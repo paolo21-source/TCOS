@@ -1,0 +1,182 @@
+---
+# ============================================
+# Playbook AWX: Manage Backup Schedule Actions (MULTI-TENANT)
+# Attiva, disattiva o elimina schedule esistenti
+# VERIFICA CHE LO SCHEDULE APPARTENGA AL TENANT CORRETTO
+# ============================================
+
+- name: Manage Backup Schedule Actions
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  
+  vars:
+    awx_host: "http://awx.k8s-prod.tcosmilano.local"
+    awx_validate_certs: false
+  vars_files:
+    - vars/awx_credentials.yaml
+  tasks:
+    # =============================================
+    # 1. VALIDAZIONE INPUT
+    # =============================================
+    
+    - name: Validate required variables
+      assert:
+        that:
+          - volume_id is defined and volume_id | length > 0
+          - schedule_id is defined and schedule_id | length > 0
+          - manage_action is defined and manage_action | length > 0
+          - manage_action in ['activate', 'deactivate', 'disable']
+          - tenant_name is defined and tenant_name | length > 0
+        fail_msg: "ERROR: Missing or invalid variables"
+        success_msg: "✓ Variables OK"
+    
+    - name: Log initial info
+      debug:
+        msg:
+          - "=============================================="
+          - "GESTIONE BACKUP SCHEDULE (MULTI-TENANT)"
+          - "=============================================="
+          - "Azione: {{ manage_action }}"
+          - "Schedule ID: {{ schedule_id }}"
+          - "Volume ID: {{ volume_id }}"
+          - "Tenant: {{ tenant_name }}"
+          - "=============================================="
+    
+    # =============================================
+    # 2. RECUPERA DETTAGLI SCHEDULE DA AWX
+    # =============================================
+    
+    - name: Get schedule details from AWX
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: GET
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        return_content: yes
+      register: schedule_details
+    
+    - name: Display schedule info
+      debug:
+        msg:
+          - "Schedule trovato in AWX:"
+          - "  Nome: {{ schedule_details.json.name }}"
+          - "  Enabled: {{ schedule_details.json.enabled }}"
+          - "  Extra data: {{ schedule_details.json.extra_data | default({}) }}"
+    
+    # =============================================
+    # 3. VERIFICA CHE LO SCHEDULE APPARTENGA AL TENANT
+    # =============================================
+    
+    - name: Extract tenant from schedule extra_data
+      set_fact:
+        schedule_tenant: "{{ schedule_details.json.extra_data.tenant_name | default('') }}"
+      when: schedule_details.json.extra_data is defined
+    
+    - name: Check tenant match
+      fail:
+        msg: |
+           ERRORE DI SICUREZZA: Lo schedule non appartiene al tenant selezionato!
+          
+      when: 
+        - schedule_tenant is defined
+        - schedule_tenant != tenant_name
+    
+    - name: Log tenant verification success
+      debug:
+        msg: " Verifica tenant OK - Lo schedule appartiene al tenant {{ tenant_name }}"
+    
+    # =============================================
+    # 4. AZIONE: ACTIVATE
+    # =============================================
+    
+    - name: Activate schedule
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: PATCH
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        body_format: json
+        body:
+          enabled: true
+        status_code: [200, 204]
+      when: manage_action == "activate"
+      register: activate_result
+    
+    - name: Show success message (activate)
+      debug:
+        msg:
+          - "=============================================="
+          - "✓ BACKUP SCHEDULE ATTIVATO"
+          - "=============================================="
+          - "Schedule: {{ schedule_details.json.name }}"
+          - "Volume ID: {{ volume_id }}"
+          - "Tenant: {{ tenant_name }}"
+          - "Prossima esecuzione: {{ schedule_details.json.next_run | default('N/A') }}"
+          - "=============================================="
+      when: manage_action == "activate"
+    
+    # =============================================
+    # 5. AZIONE: DEACTIVATE
+    # =============================================
+    
+    - name: Deactivate schedule
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: PATCH
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        body_format: json
+        body:
+          enabled: false
+        status_code: [200, 204]
+      when: manage_action == "deactivate"
+      register: deactivate_result
+    
+    - name: Show success message (deactivate)
+      debug:
+        msg:
+          - "=============================================="
+          - " BACKUP SCHEDULE DISATTIVATO"
+          - "=============================================="
+          - "Schedule: {{ schedule_details.json.name }}"
+          - "Volume ID: {{ volume_id }}"
+          - "Tenant: {{ tenant_name }}"
+          - "Lo schedule è stato disattivato ma non eliminato"
+          - "=============================================="
+      when: manage_action == "deactivate"
+    
+    # =============================================
+    # 6. AZIONE: DISABLE (Elimina)
+    # =============================================
+    
+    - name: Delete schedule
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: DELETE
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        status_code: [204, 404]
+      when: manage_action == "disable"
+      register: delete_result
+    
+    - name: Show success message (disable)
+      debug:
+        msg:
+          - "=============================================="
+          - " BACKUP SCHEDULE ELIMINATO"
+          - "=============================================="
+          - "Schedule: {{ schedule_details.json.name }}"
+          - "Volume ID: {{ volume_id }}"
+          - "Tenant: {{ tenant_name }}"
+          - "Lo schedule è stato eliminato definitivamente"
+          - "=============================================="
+      when: manage_action == "disable"

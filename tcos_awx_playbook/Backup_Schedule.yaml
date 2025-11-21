@@ -1,0 +1,405 @@
+---
+# ============================================
+# Playbook AWX: Manage Cinder Volume Backup Schedule (MULTI-TENANT)
+# Supporta: enable, disable, activate, deactivate
+# ============================================
+
+- name: Manage Cinder Volume Backup Schedule
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  
+  vars:
+    awx_host: "http://awx.k8s-prod.tcosmilano.local"
+    awx_validate_certs: false
+    retention_days: 15
+  vars_files:
+    - vars/awx_credentials.yaml
+  tasks:
+    # =============================================
+    # 1. VALIDAZIONE INPUT
+    # =============================================
+    
+    - name: Validate required variables
+      assert:
+        that:
+          - volume_id is defined and volume_id | length > 0
+          - backup_action is defined and backup_action | length > 0
+          - backup_action in ['enable', 'disable', 'activate', 'deactivate']
+          - openstack_auth_url is defined
+          - openstack_username is defined
+          - openstack_password is defined
+          - (openstack_project_id is defined) or (openstack_project_name is defined)
+        fail_msg: "ERROR: Missing or invalid variables"
+        success_msg: "✓ Variables OK - volume_id: {{ volume_id }}, action: {{ backup_action }}"
+    
+    - name: Validate schedule_id for activate/deactivate actions
+      assert:
+        that:
+          - schedule_id is defined and schedule_id | length > 0
+        fail_msg: "ERROR: schedule_id is required for activate/deactivate actions"
+      when: backup_action in ['activate', 'deactivate']
+    
+    - name: Validate backup_name for enable action
+      assert:
+        that:
+          - backup_name is defined and backup_name | length > 0
+        fail_msg: "ERROR: backup_name is required for enable action"
+      when: backup_action == 'enable'
+    
+    # =============================================
+    # 2. AUTHENTICATE OPENSTACK KEYSTONE (MULTI-TENANT)
+    # =============================================
+    
+    - name: Determine authentication method
+      set_fact:
+        use_project_id: "{{ openstack_project_id is defined and openstack_project_id != '' }}"
+
+    - name: Log authentication
+      debug:
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+
+    - name: Authenticate with project ID
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods: [password]
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                id: "{{ openstack_project_id }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_id
+      when: use_project_id | bool
+
+    - name: Authenticate with project name
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods: [password]
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                name: "{{ openstack_project_name }}"
+                domain:
+                  name: "{{ openstack_domain_name | default('Default') }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_name
+      when: not (use_project_id | bool)
+
+    - name: Set unified auth response
+      set_fact:
+        auth_response: "{{ auth_with_id if (auth_with_id is defined and not auth_with_id.skipped | default(false)) else auth_with_name }}"
+
+    - name: Extract auth token
+      set_fact:
+        os_auth_token: "{{ auth_response.x_subject_token }}"
+
+    - name: Set final tenant name
+      set_fact:
+        tenant_name: "{{ openstack_project_name | default(auth_response.json.token.project.name) }}"
+
+    - name: Log successful authentication
+      debug:
+        msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }}"
+    
+    # =============================================
+    # 3. VERIFICA ESISTENZA VOLUME (con autenticazione)
+    # =============================================
+    
+    - name: Check if volume exists in OpenStack
+      block:
+        - name: Get volume info with explicit auth
+          openstack.cloud.volume_info:
+            auth:
+              auth_url: "{{ openstack_auth_url }}"
+              username: "{{ openstack_username }}"
+              password: "{{ openstack_password }}"
+              project_id: "{{ openstack_project_id | default(omit) }}"
+              project_name: "{{ openstack_project_name | default(omit) }}"
+              domain_name: "{{ openstack_domain_name | default('Default') }}"
+            details: true
+          register: all_volumes
+        
+        - name: Find volume by ID
+          set_fact:
+            volume_data: "{{ all_volumes.volumes | selectattr('id', 'equalto', volume_id) | first | default(None) }}"
+        
+        - name: Check if volume was found
+          set_fact:
+            volume_exists: "{{ volume_data is not none }}"
+        
+        - name: Set volume name from OpenStack
+          set_fact:
+            volume_name: "{{ volume_data.name }}"
+          when: volume_exists
+        
+        - name: Display success - volume found
+          debug:
+            msg: " Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
+          when: volume_exists
+        
+        - name: Fail if volume doesn't exist
+          fail:
+            msg: " Volume {{ volume_id }} non trovato nel tenant {{ tenant_name }}"
+          when: not volume_exists
+      
+      rescue:
+        - name: Handle OpenStack API error
+          debug:
+            msg: " Errore accesso OpenStack API - impossibile verificare esistenza volume"
+        
+        - name: Use fallback volume name
+          set_fact:
+            volume_name: "{{ backup_name | default('volume_' ~ volume_id[:8]) }}"
+            volume_exists: true
+    
+    # =============================================
+    # 4. RECUPERA SCHEDULE ESISTENTI
+    # =============================================
+    
+    - name: Get all schedules from AWX
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/"
+        method: GET
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        return_content: yes
+      register: awx_schedules
+    
+    - name: Filter schedules for this volume
+      set_fact:
+        volume_schedules: "{{ awx_schedules.json.results | selectattr('name', 'search', volume_id) | list }}"
+    
+    - name: Filter active schedules for this volume
+      set_fact:
+        active_schedules: "{{ volume_schedules | selectattr('enabled', 'equalto', true) | list }}"
+    
+    # =============================================
+    # 5. DISPLAY INFO
+    # =============================================
+    
+    - name: Log action
+      debug:
+        msg: 
+          - "=============================================="
+          - "MANAGE BACKUP SCHEDULE (MULTI-TENANT)"
+          - "=============================================="
+          - "Action: {{ backup_action }}"
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Existing schedules: {{ volume_schedules | length }}"
+          - "Active schedules: {{ active_schedules | length }}"
+          - "=============================================="
+    
+    # =============================================
+    # 6. AZIONE: ENABLE (Crea nuovo schedule)
+    # =============================================
+    
+    - name: Check if active schedule already exists (for enable action)
+      fail:
+        msg: |
+          ERRORE: Esiste già un backup schedule attivo per questo volume!
+          Nome schedule esistente: {{ active_schedules[0].name }}
+          Per creare un nuovo schedule, prima disattiva o elimina quello esistente.
+      when: 
+        - backup_action == 'enable'
+        - active_schedules | length > 0
+    
+    - name: Create new backup schedule
+      awx.awx.schedule:
+        name: "Giornaliero - {{ backup_name }} - {{ tenant_name }} - ({{ volume_id }})"
+        unified_job_template: "Cinder Volume Backup"
+        rrule: "DTSTART;TZID=UTC:{{ lookup('pipe', 'date +%Y%m%d') }}T020000 RRULE:FREQ=DAILY;INTERVAL=1"
+        enabled: true
+        extra_data:
+          volume_id: "{{ volume_id }}"
+          tenant_name: "{{ tenant_name }}"
+          backup_name: "daily_{{ backup_name }}"
+          retention_days: "{{ retention_days }}"
+          openstack_auth_url: "{{ openstack_auth_url }}"
+          openstack_username: "{{ openstack_username }}"
+          openstack_password: "{{ openstack_password }}"
+          openstack_domain_name: "{{ openstack_domain_name | default('Default') }}"
+          openstack_project_id: "{{ openstack_project_id | default('') }}"
+          openstack_project_name: "{{ openstack_project_name | default(tenant_name) }}"
+        state: present
+        controller_host: "{{ awx_host }}"
+        controller_username: "{{ awx_user }}"
+        controller_password: "{{ awx_password }}"
+        validate_certs: "{{ awx_validate_certs }}"
+      when: backup_action == "enable"
+      register: schedule_create_result
+    
+    - name: Show success message (enable)
+      debug:
+        msg: 
+          - "=============================================="
+          - "✓ BACKUP SCHEDULE CREATO E ATTIVATO"
+          - "=============================================="
+          - "Schedule ID: {{ schedule_create_result.id }}"
+          - "Nome: Giornaliero - {{ backup_name }} - {{ tenant_name }}"
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Frequenza: Giornaliero (02:00 UTC)"
+          - "Retention: {{ retention_days }} giorni"
+          - "=============================================="
+      when: 
+        - backup_action == "enable"
+        - schedule_create_result is defined
+    
+    # =============================================
+    # 7. AZIONE: DISABLE (Elimina tutti gli schedule)
+    # =============================================
+    
+    - name: Delete all schedules for this volume
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ item.id }}/"
+        method: DELETE
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        status_code: [204, 404]
+      loop: "{{ volume_schedules }}"
+      when: 
+        - backup_action == "disable"
+        - volume_schedules | length > 0
+      ignore_errors: true
+    
+    - name: Show success message (disable)
+      debug:
+        msg: 
+          - "=============================================="
+          - "✓ BACKUP SCHEDULE ELIMINATI"
+          - "=============================================="
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Schedules eliminati: {{ volume_schedules | length }}"
+          - "=============================================="
+      when: backup_action == "disable"
+    
+    - name: No schedules to delete
+      debug:
+        msg: "Nessuno schedule trovato da eliminare per questo volume"
+      when: 
+        - backup_action == "disable"
+        - volume_schedules | length == 0
+    
+    # =============================================
+    # 8. AZIONE: ACTIVATE (Attiva schedule esistente)
+    # =============================================
+    
+    - name: Get schedule details
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: GET
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        return_content: yes
+      register: schedule_details
+      when: backup_action == "activate"
+    
+    - name: Activate schedule
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: PATCH
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        body_format: json
+        body:
+          enabled: true
+        status_code: [200, 204]
+      when: backup_action == "activate"
+      register: activate_result
+    
+    - name: Show success message (activate)
+      debug:
+        msg: 
+          - "=============================================="
+          - "✓ BACKUP SCHEDULE ATTIVATO"
+          - "=============================================="
+          - "Schedule ID: {{ schedule_id }}"
+          - "Nome: {{ schedule_details.json.name }}"
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Prossima esecuzione: {{ schedule_details.json.next_run | default('N/A') }}"
+          - "=============================================="
+      when: 
+        - backup_action == "activate"
+        - activate_result is defined
+    
+    # =============================================
+    # 9. AZIONE: DEACTIVATE (Disattiva schedule esistente)
+    # =============================================
+    
+    - name: Get schedule details for deactivate
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: GET
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        return_content: yes
+      register: schedule_details_deactivate
+      when: backup_action == "deactivate"
+    
+    - name: Deactivate schedule
+      uri:
+        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
+        method: PATCH
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ awx_validate_certs }}"
+        body_format: json
+        body:
+          enabled: false
+        status_code: [200, 204]
+      when: backup_action == "deactivate"
+      register: deactivate_result
+    
+    - name: Show success message (deactivate)
+      debug:
+        msg: 
+          - "=============================================="
+          - "✓ BACKUP SCHEDULE DISATTIVATO"
+          - "=============================================="
+          - "Schedule ID: {{ schedule_id }}"
+          - "Nome: {{ schedule_details_deactivate.json.name }}"
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Lo schedule è stato disattivato ma non eliminato"
+          - "=============================================="
+      when: 
+        - backup_action == "deactivate"
+        - deactivate_result is defined

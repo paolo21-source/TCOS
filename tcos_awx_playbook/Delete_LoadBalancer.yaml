@@ -1,0 +1,355 @@
+---
+- name: Delete OpenStack Load Balancer
+  hosts: localhost
+  gather_facts: no
+  
+  vars:
+    delete_floatingips: "{{ delete_floatingips | default(false) }}"
+    
+  tasks:
+    # ========================================
+    # VALIDATION
+    # ========================================
+    - name: Validate required variables
+      assert:
+        that:
+          - loadbalancer_id is defined
+          - loadbalancer_id | length > 0
+          - openstack_auth_url is defined
+          - openstack_username is defined
+          - openstack_password is defined
+          - (openstack_project_name is defined) or (openstack_project_id is defined)
+        fail_msg: "ERRORE: Variabili richieste mancanti!"
+
+    - name: Log start
+      debug:
+        msg: "  ELIMINAZIONE Load Balancer ID: {{ loadbalancer_id }}"
+
+    # ========================================
+    # NOTIFICA: INIZIO
+    # ========================================
+    - name: Send start notification to ManageIQ
+      uri:
+        url: "{{ manageiq_notification_url }}"
+        method: POST
+        headers:
+          X-Auth-Token: "{{ manageiq_auth_token }}"
+          Content-Type: application/json
+        body:
+          action: "update"
+          resource:
+            level: "warning"
+            message: "  Eliminazione Load Balancer in corso..."
+            subject_type: "User"
+            subject_id: "{{ manageiq_user_id }}"
+        body_format: json
+        status_code: 200
+        timeout: 10
+        validate_certs: no
+      when:
+        - manageiq_notification_url is defined
+        - manageiq_auth_token is defined
+      ignore_errors: yes
+
+    # ========================================
+    # AUTHENTICATE OPENSTACK KEYSTONE (MULTI-TENANT)
+    # ========================================
+    - name: Validate OpenStack credentials
+      assert:
+        that:
+          - openstack_auth_url is defined
+          - openstack_username is defined
+          - openstack_password is defined
+          - openstack_project_id is defined or openstack_project_name is defined
+        fail_msg: " Credenziali OpenStack mancanti!"
+
+    - name: Determine authentication method
+      set_fact:
+        use_project_id: "{{ openstack_project_id is defined and openstack_project_id != '' }}"
+
+    - name: Log authentication
+      debug:
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+
+    - name: Authenticate with project ID
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods:
+                - password
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                id: "{{ openstack_project_id }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_id
+      when: use_project_id | bool
+
+    - name: Authenticate with project name
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods:
+                - password
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                name: "{{ openstack_project_name }}"
+                domain:
+                  name: "{{ openstack_domain_name | default('Default') }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_name
+      when: not (use_project_id | bool)
+
+    - name: Set unified auth response
+      set_fact:
+        auth_response: "{{ auth_with_id if (auth_with_id is defined and not auth_with_id.skipped | default(false)) else auth_with_name }}"
+
+    - name: Extract auth token
+      set_fact:
+        os_auth_token: "{{ auth_response.x_subject_token }}"
+
+    - name: Parse service catalog
+      set_fact:
+        service_catalog: "{{ auth_response.json.token.catalog }}"
+
+    - name: Log successful authentication
+      debug:
+        msg: " Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+
+    # ========================================
+    # FIND OCTAVIA ENDPOINT
+    # ========================================
+    - name: Find Octavia endpoint
+      set_fact:
+        octavia_endpoint: "{{ item.endpoints | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first | default(item.endpoints | selectattr('interface', 'equalto', 'internal') | map(attribute='url') | first) }}"
+      when: item.type == 'load-balancer' or item.name == 'octavia'
+      loop: "{{ service_catalog }}"
+      register: octavia_search
+
+    - name: Set Octavia URL
+      set_fact:
+        octavia_url: "{{ octavia_search.results | selectattr('ansible_facts', 'defined') | map(attribute='ansible_facts.octavia_endpoint') | select('defined') | first }}"
+
+    - name: Fail if Octavia not found
+      fail:
+        msg: " Servizio Octavia non trovato"
+      when: octavia_url is not defined or octavia_url == ""
+
+    - name: Log Octavia endpoint
+      debug:
+        msg: " Octavia: {{ octavia_url }}"
+
+    # ========================================
+    # GET LOAD BALANCER INFO
+    # ========================================
+    - name: Get Load Balancer details
+      uri:
+        url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+          Content-Type: application/json
+        status_code: 200
+        return_content: yes
+        validate_certs: no
+      register: lb_response
+
+    - name: Set Load Balancer facts
+      set_fact:
+        lb_name: "{{ lb_response.json.loadbalancer.name }}"
+        lb_vip_address: "{{ lb_response.json.loadbalancer.vip_address }}"
+        lb_vip_port_id: "{{ lb_response.json.loadbalancer.vip_port_id }}"
+        lb_operating_status: "{{ lb_response.json.loadbalancer.operating_status }}"
+
+    - name: Log Load Balancer info
+      debug:
+        msg: " Load Balancer: {{ lb_name }} (VIP: {{ lb_vip_address }})"
+
+    # ========================================
+    # WAIT FOR LB TO BE ACTIVE
+    # ========================================
+    - name: Wait for Load Balancer to be ACTIVE
+      uri:
+        url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        status_code: 200
+        return_content: yes
+        validate_certs: no
+      register: lb_status_check
+      until: lb_status_check.json.loadbalancer.provisioning_status == 'ACTIVE'
+      retries: 60
+      delay: 5
+
+    - name: Log ready for deletion
+      debug:
+        msg: " Load Balancer ACTIVE - pronto per eliminazione"
+
+    # ========================================
+    # GET FLOATING IPS (if delete requested)
+    # ========================================
+    - name: Find Neutron endpoint
+      set_fact:
+        neutron_endpoint: "{{ item.endpoints | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first | default(item.endpoints | selectattr('interface', 'equalto', 'internal') | map(attribute='url') | first) }}"
+      when: 
+        - item.type == 'network'
+        - delete_floatingips | bool
+      loop: "{{ service_catalog }}"
+      register: neutron_search
+
+    - name: Set Neutron URL
+      set_fact:
+        neutron_url: "{{ neutron_search.results | selectattr('ansible_facts', 'defined') | map(attribute='ansible_facts.neutron_endpoint') | select('defined') | first }}"
+      when: delete_floatingips | bool
+
+    - name: Get Floating IPs attached to VIP port
+      uri:
+        url: "{{ neutron_url }}/v2.0/floatingips?port_id={{ lb_vip_port_id }}"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        status_code: 200
+        return_content: yes
+        validate_certs: no
+      register: fips_response
+      when: delete_floatingips | bool
+
+    - name: Log Floating IPs found
+      debug:
+        msg: " Trovati {{ fips_response.json.floatingips | length }} Floating IP da eliminare"
+      when: 
+        - delete_floatingips | bool
+        - fips_response is defined
+        - fips_response.json.floatingips | length > 0
+
+    # ========================================
+    # DELETE LOAD BALANCER (CASCADE)
+    # ========================================
+    - name: Delete Load Balancer with cascade
+      uri:
+        url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}?cascade=true"
+        method: DELETE
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        status_code: 204
+        validate_certs: no
+
+    - name: Log deletion initiated
+      debug:
+        msg: "  Eliminazione Load Balancer avviata (cascade=true)"
+
+    # ========================================
+    # WAIT FOR DELETION TO COMPLETE
+    # ========================================
+    - name: Wait for Load Balancer deletion
+      uri:
+        url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        status_code: [200, 404]
+        return_content: yes
+        validate_certs: no
+      register: lb_delete_check
+      until: lb_delete_check.status == 404
+      retries: 120
+      delay: 5
+      ignore_errors: yes
+
+    - name: Verify deletion completed
+      debug:
+        msg: "Load Balancer eliminato con successo"
+      when: lb_delete_check.status == 404
+
+    # ========================================
+    # DELETE FLOATING IPS (if requested)
+    # ========================================
+    - name: Delete Floating IPs
+      uri:
+        url: "{{ neutron_url }}/v2.0/floatingips/{{ item.id }}"
+        method: DELETE
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        status_code: 204
+        validate_certs: no
+      loop: "{{ fips_response.json.floatingips | default([]) }}"
+      when: 
+        - delete_floatingips | bool
+        - fips_response is defined
+        - fips_response.json.floatingips | length > 0
+
+    - name: Log Floating IPs deletion
+      debug:
+        msg: " Floating IP eliminati"
+      when:
+        - delete_floatingips | bool
+        - fips_response is defined
+        - fips_response.json.floatingips | length > 0
+
+    # ========================================
+    # FINAL SUMMARY
+    # ========================================
+    - name: Generate final summary
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════════════╗
+          ║           LOAD BALANCER ELIMINATO CON SUCCESSO                    ║
+          ╚═══════════════════════════════════════════════════════════════════╝
+          
+          Load Balancer: {{ lb_name }}
+          VIP:           {{ lb_vip_address }}
+          
+          Eliminato:
+             Load Balancer
+             Listener
+             Pool
+             Membri
+             Health Monitor
+            {{ ' Floating IP' if (delete_floatingips | bool and fips_response is defined and fips_response.json.floatingips | length > 0) else '⏭️  Floating IP (non eliminati)' }}
+
+    - name: Send final notification
+      uri:
+        url: "{{ manageiq_notification_url }}"
+        method: POST
+        headers:
+          X-Auth-Token: "{{ manageiq_auth_token }}"
+          Content-Type: application/json
+        body:
+          action: "update"
+          resource:
+            level: "success"
+            message: " Load Balancer {{ lb_name }} eliminato con successo"
+            subject_type: "User"
+            subject_id: "{{ manageiq_user_id }}"
+        body_format: json
+        status_code: 200
+        timeout: 10
+        validate_certs: no
+      when:
+        - manageiq_notification_url is defined
+        - manageiq_auth_token is defined
+      ignore_errors: yes

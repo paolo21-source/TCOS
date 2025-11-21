@@ -1,0 +1,583 @@
+- name: Create OpenStack Load Balancer L4 - Complete
+  hosts: localhost
+  gather_facts: no
+  collections:
+    - openstack.cloud
+  
+  vars:
+    # Nomi derivati automaticamente
+    listener_name: "{{ lb_name }}-listener"
+    pool_name: "{{ lb_name }}-pool"
+    monitor_name: "{{ monitor_name | default(lb_name + '-monitor') }}"
+    
+    # Default values
+    listener_protocol: "{{ listener_protocol | default('TCP') }}"
+    pool_protocol: "{{ pool_protocol | default('TCP') }}"
+    pool_algorithm: "{{ pool_algorithm | default('ROUND_ROBIN') }}"
+    
+    # Feature flags (listener e pool sempre true)
+    create_listener: true
+    create_pool: true
+    create_health_monitor: "{{ create_health_monitor | default(false) }}"
+  
+  tasks:
+    # ========================================
+    # VALIDATION
+    # ========================================
+    - name: Validate required variables
+      assert:
+        that:
+          - lb_name is defined
+          - lb_name | length > 0
+          - lb_subnet is defined
+          - listener_port is defined
+          - listener_port | int > 0
+          - listener_port | int < 65536
+        fail_msg: "ERRORE: Variabili richieste mancanti! Richieste: lb_name, lb_subnet, listener_port"
+
+    # ========================================
+    # AUTHENTICATE OPENSTACK KEYSTONE (MULTI-TENANT)
+    # ========================================
+    - name: Validate OpenStack credentials
+      assert:
+        that:
+          - openstack_auth_url is defined
+          - openstack_username is defined
+          - openstack_password is defined
+          - openstack_project_id is defined or openstack_project_name is defined
+        fail_msg: " Credenziali OpenStack mancanti!"
+
+    - name: Determine authentication method
+      set_fact:
+        use_project_id: "{{ openstack_project_id is defined and openstack_project_id != '' }}"
+
+    - name: Log authentication
+      debug:
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+
+    - name: Authenticate with project ID
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods:
+                - password
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                id: "{{ openstack_project_id }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_id
+      when: use_project_id | bool
+
+    - name: Authenticate with project name
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods:
+                - password
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                name: "{{ openstack_project_name }}"
+                domain:
+                  name: "{{ openstack_domain_name | default('Default') }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_name
+      when: not (use_project_id | bool)
+
+    - name: Set unified auth response
+      set_fact:
+        auth_response: "{{ auth_with_id if (auth_with_id is defined and not auth_with_id.skipped | default(false)) else auth_with_name }}"
+
+    - name: Extract auth token
+      set_fact:
+        os_auth_token: "{{ auth_response.x_subject_token }}"
+
+    - name: Parse service catalog
+      set_fact:
+        service_catalog: "{{ auth_response.json.token.catalog }}"
+
+    - name: Log successful authentication
+      debug:
+        msg: " Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+
+    # ========================================
+    # CONFIGURE OPENSTACK CLIENT ENVIRONMENT
+    # ========================================
+    - name: Set OpenStack authentication environment
+      set_fact:
+        openstack_auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id if (openstack_project_id is defined and openstack_project_id != '') else omit }}"
+          project_name: "{{ openstack_project_name if (openstack_project_id is not defined or openstack_project_id == '') else omit }}"
+          user_domain_name: "{{ openstack_domain_name | default('Default') }}"
+          project_domain_name: "{{ openstack_domain_name | default('Default') }}"
+
+    - name: Log OpenStack configuration
+      debug:
+        msg: "🔧 Configurazione OpenStack per moduli cloud | Project: {{ openstack_project_name | default(openstack_project_id) }}"
+
+    # ========================================
+    # MAIN BLOCK CON RESCUE
+    # ========================================
+    - name: Main execution block
+      block:
+        # ========================================
+        # NOTIFICA 1: INIZIO CREAZIONE
+        # ========================================
+        - name: Send start notification to ManageIQ
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "create"
+              resource:
+                level: "info"
+                message: "Avvio creazione Load Balancer L4 '{{ lb_name }}' | Subnet: {{ lb_subnet }} | Listener: {{ listener_protocol }}:{{ listener_port }}"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+          delegate_to: localhost
+          when: 
+            - manageiq_notification_url is defined
+            - manageiq_auth_token is defined
+            - manageiq_user_id is defined
+          run_once: true
+          ignore_errors: yes
+
+        # ========================================
+        # LOGGING CONFIGURATION
+        # ========================================
+        - name: Log initial configuration
+          debug:
+            msg: |
+              ╔═══════════════════════════════════════════════════════╗
+              ║     CONFIGURAZIONE LOAD BALANCER L4 - OPENSTACK      ║
+              ╚═══════════════════════════════════════════════════════╝
+              
+              LOAD BALANCER:
+              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              Nome:                  {{ lb_name }}
+              IP Address:            {{ lb_ip_address | default('Auto-assign') }}
+              Subnet VIP:            {{ lb_subnet }}
+              
+              LISTENER:
+              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              Protocollo:            {{ listener_protocol }}
+              Porta:                 {{ listener_port }}
+              
+              POOL:
+              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              Algoritmo:             {{ pool_algorithm }}
+              
+              BACKEND SERVERS:
+              ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              Backend Servers:       {{ backend_servers | default('Nessuno - pool vuoto') }}
+
+        # ========================================
+        # OPTIONAL CLEANUP
+        # ========================================
+        - name: Optional cleanup - Remove existing Load Balancer
+          openstack.cloud.loadbalancer:
+            auth: "{{ openstack_auth }}"
+            name: "{{ lb_name }}"
+            state: absent
+            wait: yes
+            timeout: 300
+          ignore_errors: yes
+          when: cleanup_existing | default(false) | bool
+
+        # ========================================
+        # CREATE LOAD BALANCER
+        # ========================================
+        - name: Create Load Balancer
+          openstack.cloud.loadbalancer:
+            auth: "{{ openstack_auth }}"
+            name: "{{ lb_name }}"
+            vip_subnet: "{{ lb_subnet }}"
+            vip_address: "{{ lb_ip_address | default(omit) }}"
+            description: "{{ lb_description | default(omit) }}"
+            flavor: "{{ lb_flavor | default(omit) }}"
+            state: present
+            wait: yes
+            timeout: 800
+          register: lb_created
+
+        - name: Extract Load Balancer information
+          set_fact:
+            lb_vip_address: "{{ lb_created.loadbalancer.vip_address | default(lb_created.vip_address | default('N/A')) }}"
+            lb_vip_port_id: "{{ lb_created.loadbalancer.vip_port_id | default(lb_created.vip_port_id | default('N/A')) }}"
+            lb_id: "{{ lb_created.loadbalancer.id | default(lb_created.id | default('N/A')) }}"
+
+        - name: Log Load Balancer creation
+          debug:
+            msg: "Load Balancer '{{ lb_name }}' creato! ID: {{ lb_id }}, VIP: {{ lb_vip_address }}"
+
+        # ========================================
+        # NOTIFICA 2: LOAD BALANCER CREATO
+        # ========================================
+        - name: Send Load Balancer created notification
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "create"
+              resource:
+                level: "info"
+                message: "Load Balancer '{{ lb_name }}' creato | VIP: {{ lb_vip_address }} | ID: {{ lb_id }}"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+          delegate_to: localhost
+          when: 
+            - manageiq_notification_url is defined
+            - manageiq_auth_token is defined
+            - manageiq_user_id is defined
+          run_once: true
+          ignore_errors: yes
+
+        # ========================================
+        # CREATE LISTENER (Always)
+        # ========================================
+        - name: Create Listener
+          openstack.cloud.lb_listener:
+            auth: "{{ openstack_auth }}"
+            name: "{{ listener_name }}"
+            load_balancer: "{{ lb_name }}"
+            protocol: "{{ listener_protocol | upper }}"
+            protocol_port: "{{ listener_port | int }}"
+            description: "{{ listener_description | default(omit) }}"
+            timeout_client_data: "{{ listener_client_data_timeout | default(50000) | int }}"
+            timeout_member_data: "{{ listener_member_data_timeout | default(50000) | int }}"
+            is_admin_state_up: true
+            state: present
+            wait: yes
+            timeout: 120
+          register: listener_created
+
+        - name: Log Listener creation
+          debug:
+            msg: "Listener '{{ listener_name }}' creato! Protocollo: {{ listener_protocol }}, Porta: {{ listener_port }}"
+
+        # ========================================
+        # NOTIFICA 3: LISTENER CREATO
+        # ========================================
+        - name: Send Listener created notification
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "create"
+              resource:
+                level: "info"
+                message: "Listener '{{ listener_name }}' configurato | Protocollo: {{ listener_protocol }} | Porta: {{ listener_port }}"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+          delegate_to: localhost
+          when: 
+            - manageiq_notification_url is defined
+            - manageiq_auth_token is defined
+            - manageiq_user_id is defined
+          run_once: true
+          ignore_errors: yes
+
+        # ========================================
+        # CREATE POOL (Always)
+        # ========================================
+        - name: Create Pool
+          openstack.cloud.lb_pool:
+            auth: "{{ openstack_auth }}"
+            name: "{{ pool_name }}"
+            listener: "{{ listener_name }}"
+            protocol: "{{ pool_protocol | upper }}"
+            lb_algorithm: "{{ pool_algorithm }}"
+            description: "{{ pool_description | default(omit) }}"
+            state: present
+            wait: yes
+            timeout: 120
+          register: pool_created
+
+        - name: Log Pool creation
+          debug:
+            msg: "Pool '{{ pool_name }}' creato! Algoritmo: {{ pool_algorithm }}"
+
+        # ========================================
+        # PARSE AND ADD POOL MEMBERS (Optional - 0 to N)
+        # ========================================
+        - name: Add Pool Members block
+          when: 
+            - backend_servers is defined
+            - backend_servers | length > 0
+          block:
+            - name: Parse backend servers string
+              set_fact:
+                parsed_members: "{{ backend_servers.split(',') | map('trim') | list }}"
+
+            - name: Create pool members list with instance names
+              set_fact:
+                pool_members_list: "{{ pool_members_list | default([]) + [{'name': item.split('|')[0] | trim, 'address': item.split('|')[1].split(':')[0] | trim, 'protocol_port': item.split('|')[1].split(':')[1] | trim | int}] }}"
+              loop: "{{ parsed_members }}"
+              when: 
+                - item | length > 0
+                - "'|' in item"
+                - "':' in item"
+
+            - name: Add members to pool
+              openstack.cloud.lb_member:
+                auth: "{{ openstack_auth }}"
+                name: "{{ item.name }}"
+                pool: "{{ pool_name }}"
+                address: "{{ item.address }}"
+                protocol_port: "{{ item.protocol_port }}"
+                subnet_id: "{{ backend_subnet | default(lb_subnet) }}"
+                weight: "{{ backend_weight | default(1) | int }}"
+                state: present
+                wait: yes
+                timeout: 120
+              loop: "{{ pool_members_list | default([]) }}"
+              register: members_added
+              when: pool_members_list is defined
+
+            - name: Log members added
+              debug:
+                msg: "Aggiunti {{ pool_members_list | default([]) | length }} membri al pool '{{ pool_name }}'"
+              when: pool_members_list is defined
+
+            # ========================================
+            # NOTIFICA 4: POOL MEMBERS AGGIUNTI
+            # ========================================
+            - name: Send Pool Members notification
+              uri:
+                url: "{{ manageiq_notification_url }}"
+                method: POST
+                headers:
+                  X-Auth-Token: "{{ manageiq_auth_token }}"
+                  Content-Type: application/json
+                body:
+                  action: "create"
+                  resource:
+                    level: "info"
+                    message: "Pool '{{ pool_name }}' configurato | Algoritmo: {{ pool_algorithm }} | Membri: {{ pool_members_list | default([]) | length }}"
+                    subject_type: "User"
+                    subject_id: "{{ manageiq_user_id }}"
+                body_format: json
+                status_code: 200
+                timeout: 10
+              delegate_to: localhost
+              when: 
+                - manageiq_notification_url is defined
+                - manageiq_auth_token is defined
+                - manageiq_user_id is defined
+                - pool_members_list is defined
+              run_once: true
+              ignore_errors: yes
+
+        - name: Log pool without members
+          when: 
+            - backend_servers is not defined or backend_servers | length == 0
+          debug:
+            msg: "Pool creato senza membri. Potrai aggiungerne in seguito tramite OpenStack."
+
+        # ========================================
+        # CREATE HEALTH MONITOR (Optional)
+        # ========================================
+        - name: Create Health Monitor block
+          when: 
+            - create_health_monitor | bool
+            - monitor_type is defined
+            - monitor_delay is defined
+            - monitor_timeout is defined
+          block:
+            - name: Create Health Monitor
+              openstack.cloud.lb_health_monitor:
+                auth: "{{ openstack_auth }}"
+                name: "{{ monitor_name }}"
+                pool: "{{ pool_name }}"
+                type: "{{ monitor_type | upper }}"
+                delay: "{{ monitor_delay | int }}"
+                health_monitor_timeout: "{{ monitor_timeout | int }}"
+                max_retries: "{{ monitor_max_retries | default(3) | int }}"
+                max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
+                http_method: "{{ monitor_http_method | default(omit) }}"
+                url_path: "{{ monitor_url_path | default(omit) }}"
+                expected_codes: "{{ monitor_expected_codes | default(omit) }}"
+                state: present
+                wait: yes
+                timeout: 120
+              register: monitor_created
+
+            - name: Log Health Monitor creation
+              debug:
+                msg: "Health Monitor '{{ monitor_name }}' creato! Tipo: {{ monitor_type }}"
+
+            # ========================================
+            # NOTIFICA 5: HEALTH MONITOR CREATO
+            # ========================================
+            - name: Send Health Monitor notification
+              uri:
+                url: "{{ manageiq_notification_url }}"
+                method: POST
+                headers:
+                  X-Auth-Token: "{{ manageiq_auth_token }}"
+                  Content-Type: application/json
+                body:
+                  action: "create"
+                  resource:
+                    level: "info"
+                    message: "Health Monitor '{{ monitor_name }}' configurato | Tipo: {{ monitor_type }} | Delay: {{ monitor_delay }}s"
+                    subject_type: "User"
+                    subject_id: "{{ manageiq_user_id }}"
+                body_format: json
+                status_code: 200
+                timeout: 10
+              delegate_to: localhost
+              when: 
+                - manageiq_notification_url is defined
+                - manageiq_auth_token is defined
+                - manageiq_user_id is defined
+              run_once: true
+              ignore_errors: yes
+
+        - name: Log Health Monitor skipped
+          debug:
+            msg: "Health Monitor non configurato (parametri mancanti o disabilitato)"
+          when: 
+            - not (create_health_monitor | bool) or
+              monitor_type is not defined or
+              monitor_delay is not defined or
+              monitor_timeout is not defined
+
+        # ========================================
+        # FLOATING IP MANAGEMENT (Optional)
+        # ========================================
+        - name: Floating IP management block
+          when: 
+            - assign_floating_ip | default(false) | bool
+            - lb_vip_port_id is defined
+            - lb_vip_port_id != 'N/A'
+          block:
+            - name: Create or get existing Floating IP
+              openstack.cloud.floating_ip:
+                auth: "{{ openstack_auth }}"
+                network: "{{ floating_ip_network | default('external_pub_vlan20') }}"
+                state: present
+              register: fip_created
+
+            - name: Attach Floating IP to Load Balancer VIP port
+              openstack.cloud.floating_ip:
+                auth: "{{ openstack_auth }}"
+                floating_ip_address: "{{ fip_created.floating_ip.floating_ip_address }}"
+                port: "{{ lb_vip_port_id }}"
+                state: present
+              register: fip_attached
+
+            - name: Save Floating IP
+              set_fact:
+                lb_floating_ip: "{{ fip_created.floating_ip.floating_ip_address }}"
+
+            - name: Log Floating IP assignment
+              debug:
+                msg: "Floating IP {{ lb_floating_ip }} assegnato al Load Balancer"
+
+            # ========================================
+            # NOTIFICA 6: FLOATING IP ASSEGNATO
+            # ========================================
+            - name: Send Floating IP notification
+              uri:
+                url: "{{ manageiq_notification_url }}"
+                method: POST
+                headers:
+                  X-Auth-Token: "{{ manageiq_auth_token }}"
+                  Content-Type: application/json
+                body:
+                  action: "create"
+                  resource:
+                    level: "info"
+                    message: "Floating IP {{ lb_floating_ip }} assegnato al Load Balancer '{{ lb_name }}'"
+                    subject_type: "User"
+                    subject_id: "{{ manageiq_user_id }}"
+                body_format: json
+                status_code: 200
+                timeout: 10
+              delegate_to: localhost
+              when: 
+                - manageiq_notification_url is defined
+                - manageiq_auth_token is defined
+                - manageiq_user_id is defined
+              run_once: true
+              ignore_errors: yes
+
+        # ========================================
+        # FINAL SUMMARY
+        # ========================================
+        - name: Generate final summary
+          debug:
+            msg: |
+              ╔═══════════════════════════════════════════════════════════════════╗
+              ║                  LOAD BALANCER CREATO CON SUCCESSO                ║
+              ╚═══════════════════════════════════════════════════════════════════╝
+              
+              INFORMAZIONI:
+              Nome:     {{ lb_name }}
+              VIP:      {{ lb_vip_address }}
+              {% if lb_floating_ip is defined %}Floating: {{ lb_floating_ip }}{% endif %}
+              Listener: {{ listener_protocol }}:{{ listener_port }}
+              Pool:     {{ pool_algorithm }}
+              {% if pool_members_list is defined %}Membri:   {{ pool_members_list | length }}{% endif %}
+
+      rescue:
+        - name: Cleanup on failure
+          openstack.cloud.loadbalancer:
+            auth: "{{ openstack_auth }}"
+            name: "{{ lb_name }}"
+            state: absent
+            wait: yes
+          ignore_errors: yes
+
+        - name: Log cleanup
+          debug:
+            msg: "Errore rilevato. Risorse parzialmente create eliminate."
+
+        - name: Fail the playbook
+          fail:
+            msg: "Creazione Load Balancer L4 fallita: {{ ansible_failed_task.name | default('operazione sconosciuta') }}"

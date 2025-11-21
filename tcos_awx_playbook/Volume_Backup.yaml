@@ -1,0 +1,349 @@
+---
+# ============================================
+# Playbook AWX: Cinder Volume Backup (One-Shot) - MULTI-TENANT
+# Eseguito dallo schedule per fare backup automatici
+# ============================================
+
+- name: Create Cinder Volume Backup
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  
+  tasks:
+    # =============================================
+    # 1. VALIDAZIONE INPUT
+    # =============================================
+    
+    - name: Validate required variables
+      assert:
+        that:
+          - volume_id is defined and volume_id | length > 0
+          - tenant_name is defined and tenant_name | length > 0
+          - retention_days is defined
+          - openstack_auth_url is defined
+          - openstack_username is defined
+          - openstack_password is defined
+          - (openstack_project_id is defined) or (openstack_project_name is defined)
+        fail_msg: "ERROR: Missing required variables"
+        success_msg: "✓ Variables OK - volume_id: {{ volume_id }}, tenant: {{ tenant_name }}"
+    
+    # =============================================
+    # 2. AUTHENTICATE OPENSTACK KEYSTONE (MULTI-TENANT)
+    # =============================================
+    
+    - name: Determine authentication method
+      set_fact:
+        use_project_id: "{{ openstack_project_id is defined and openstack_project_id != '' }}"
+
+    - name: Log authentication
+      debug:
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+
+    - name: Authenticate with project ID
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods: [password]
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                id: "{{ openstack_project_id }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_id
+      when: use_project_id | bool
+
+    - name: Authenticate with project name
+      uri:
+        url: "{{ openstack_auth_url }}/v3/auth/tokens"
+        method: POST
+        body:
+          auth:
+            identity:
+              methods: [password]
+              password:
+                user:
+                  name: "{{ openstack_username }}"
+                  domain:
+                    name: "{{ openstack_domain_name | default('Default') }}"
+                  password: "{{ openstack_password }}"
+            scope:
+              project:
+                name: "{{ openstack_project_name }}"
+                domain:
+                  name: "{{ openstack_domain_name | default('Default') }}"
+        body_format: json
+        status_code: 201
+        return_content: yes
+        validate_certs: no
+      register: auth_with_name
+      when: not (use_project_id | bool)
+
+    - name: Set unified auth response
+      set_fact:
+        auth_response: "{{ auth_with_id if (auth_with_id is defined and not auth_with_id.skipped | default(false)) else auth_with_name }}"
+
+    - name: Extract auth token
+      set_fact:
+        os_auth_token: "{{ auth_response.x_subject_token }}"
+
+    - name: Log successful authentication
+      debug:
+        msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }}"
+    
+    # =============================================
+    # 3. VERIFICA ESISTENZA VOLUME
+    # =============================================
+    
+    - name: Check if volume exists in OpenStack
+      block:
+        - name: Get volume info with explicit auth
+          openstack.cloud.volume_info:
+            auth:
+              auth_url: "{{ openstack_auth_url }}"
+              username: "{{ openstack_username }}"
+              password: "{{ openstack_password }}"
+              project_id: "{{ openstack_project_id | default(omit) }}"
+              project_name: "{{ openstack_project_name | default(omit) }}"
+              domain_name: "{{ openstack_domain_name | default('Default') }}"
+            details: true
+          register: all_volumes
+        
+        - name: Find volume by ID
+          set_fact:
+            volume_data: "{{ all_volumes.volumes | selectattr('id', 'equalto', volume_id) | first | default(None) }}"
+        
+        - name: Check if volume was found
+          set_fact:
+            volume_exists: "{{ volume_data is not none }}"
+        
+        - name: Exit if volume doesn't exist
+          when: not volume_exists
+          block:
+            - name: Log missing volume
+              debug:
+                msg:
+                  - "=============================================="
+                  - " VOLUME NON TROVATO"
+                  - "=============================================="
+                  - "Volume ID: {{ volume_id }}"
+                  - "Tenant: {{ tenant_name }}"
+                  - "---"
+                  - "Il volume è stato probabilmente eliminato."
+                  - "Il backup schedule dovrebbe essere disabilitato."
+                  - "Uscita senza errori per non bloccare lo schedule."
+                  - "=============================================="
+            
+            - name: End playbook successfully (volume doesn't exist)
+              meta: end_play
+        
+        - name: Set volume name from OpenStack
+          set_fact:
+            volume_name: "{{ volume_data.name }}"
+          when: volume_exists
+        
+        - name: Display success - volume found
+          debug:
+            msg: " Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
+          when: volume_exists
+      
+      rescue:
+        - name: Handle OpenStack API error
+          debug:
+            msg: " Errore accesso OpenStack API - impossibile verificare esistenza volume"
+        
+        - name: Use fallback volume name
+          set_fact:
+            volume_name: "{{ backup_name | default('volume_' ~ volume_id[:8]) }}"
+            volume_exists: true
+    
+    # =============================================
+    # 4. GENERA NOME BACKUP FINALE
+    # Format: anno_mese_giorno_nome_backup_tenant
+    # =============================================
+    
+    - name: Generate date prefix
+      set_fact:
+        date_prefix: "{{ ansible_date_time.year }}_{{ '%02d' | format(ansible_date_time.month | int) }}_{{ '%02d' | format(ansible_date_time.day | int) }}"
+    
+    - name: Clean tenant name
+      set_fact:
+        clean_tenant_name: "{{ tenant_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
+    
+    - name: Check if custom backup_name is provided
+      set_fact:
+        has_backup_name: "{{ backup_name is defined and backup_name | length > 0 }}"
+    
+    - name: Use custom backup name if provided
+      set_fact:
+        clean_backup_name: "{{ backup_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
+      when: has_backup_name
+    
+    - name: Generate default backup name from volume if not provided
+      set_fact:
+        clean_backup_name: "backup_{{ volume_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
+      when: not has_backup_name
+    
+    - name: Compose final backup name (date + name + tenant)
+      set_fact:
+        final_backup_name: "{{ date_prefix }}_{{ clean_backup_name }}_{{ clean_tenant_name }}"
+    
+    # =============================================
+    # 5. DISPLAY INFO
+    # =============================================
+    
+    - name: Display backup info
+      debug:
+        msg:
+          - "=============================================="
+          - "INIZIO BACKUP (MULTI-TENANT)"
+          - "=============================================="
+          - "Volume ID: {{ volume_id }}"
+          - "Volume Name: {{ volume_name }}"
+          - "Tenant: {{ tenant_name }}"
+          - "---"
+          - "Nome backup finale: {{ final_backup_name }}"
+          - "  - Data: {{ date_prefix }}"
+          - "  - Nome: {{ clean_backup_name }}"
+          - "  - Tenant: {{ clean_tenant_name }}"
+          - "---"
+          - "Retention: {{ retention_days }} giorni"
+          - "=============================================="
+    
+    # =============================================
+    # 6. CREA BACKUP (con autenticazione esplicita)
+    # =============================================
+    
+    - name: Create volume backup
+      openstack.cloud.volume_backup:
+        auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id | default(omit) }}"
+          project_name: "{{ openstack_project_name | default(omit) }}"
+          domain_name: "{{ openstack_domain_name | default('Default') }}"
+        volume: "{{ volume_id }}"
+        state: present
+        force: true
+        name: "{{ final_backup_name }}"
+        description: "Backup automatico daily - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }}"
+      register: backup_result
+    
+    - name: Wait for backup to complete
+      openstack.cloud.volume_backup_info:
+        auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id | default(omit) }}"
+          project_name: "{{ openstack_project_name | default(omit) }}"
+          domain_name: "{{ openstack_domain_name | default('Default') }}"
+        name: "{{ final_backup_name }}"
+      register: backup_status
+      until: backup_status.volume_backups[0].status in ['available', 'error']
+      retries: 60
+      delay: 10
+      when: backup_result is defined
+    
+    - name: Check backup status
+      fail:
+        msg: "Backup failed with status: {{ backup_status.volume_backups[0].status }}"
+      when: 
+        - backup_status is defined
+        - backup_status.volume_backups[0].status == 'error'
+    
+    - name: Display backup creation success
+      debug:
+        msg: "✓ Backup creato con successo: {{ final_backup_name }}"
+    
+    # =============================================
+    # 7. GESTIONE RETENTION (con autenticazione esplicita)
+    # =============================================
+    
+    - name: Get all backups for this volume
+      openstack.cloud.volume_backup_info:
+        auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id | default(omit) }}"
+          project_name: "{{ openstack_project_name | default(omit) }}"
+          domain_name: "{{ openstack_domain_name | default('Default') }}"
+      register: all_backups
+    
+    - name: Filter backups for this volume only
+      set_fact:
+        volume_backups: "{{ all_backups.volume_backups | selectattr('volume_id', 'equalto', volume_id) | list }}"
+    
+    - name: Sort backups by creation date (oldest first)
+      set_fact:
+        sorted_backups: "{{ volume_backups | sort(attribute='created_at') }}"
+    
+    - name: Calculate retention date (epoch)
+      set_fact:
+        retention_timestamp: "{{ (ansible_date_time.epoch | int - (retention_days | int * 86400)) }}"
+    
+    - name: Find old backups to delete
+      set_fact:
+        old_backups: []
+    
+    - name: Identify old backups based on retention
+      set_fact:
+        old_backups: "{{ old_backups + [item] }}"
+      loop: "{{ sorted_backups }}"
+      when: 
+        - item.created_at is defined
+        - (item.created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int < retention_timestamp | int
+    
+    - name: Display retention info
+      debug:
+        msg:
+          - "Backup totali per questo volume: {{ volume_backups | length }}"
+          - "Backup da eliminare (retention): {{ old_backups | length }}"
+    
+    - name: Delete old backups
+      openstack.cloud.volume_backup:
+        auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id | default(omit) }}"
+          project_name: "{{ openstack_project_name | default(omit) }}"
+          domain_name: "{{ openstack_domain_name | default('Default') }}"
+        name: "{{ item.id }}"
+        state: absent
+      loop: "{{ old_backups }}"
+      when: old_backups | length > 0
+      ignore_errors: true
+    
+    # =============================================
+    # 8. SUMMARY
+    # =============================================
+    
+    - name: Show success message
+      debug:
+        msg:
+          - "=============================================="
+          - "✓ BACKUP COMPLETATO CON SUCCESSO"
+          - "=============================================="
+          - "Backup Name: {{ final_backup_name }}"
+          - "Backup ID: {{ backup_result.backup.id | default('N/A') }}"
+          - "Volume: {{ volume_name }} ({{ volume_id }})"
+          - "Tenant: {{ tenant_name }}"
+          - "Status: {{ backup_status.volume_backups[0].status | default('unknown') }}"
+          - "---"
+          - "Backup totali per questo volume: {{ volume_backups | length }}"
+          - "Backup eliminati (retention): {{ old_backups | length }}"
+          - "Retention policy: {{ retention_days }} giorni"
+          - "=============================================="
