@@ -85,6 +85,7 @@
 
     - name: Authenticate with project name
       uri:
+        use_proxy: false
         url: "{{ openstack_auth_url }}/v3/auth/tokens"
         method: POST
         body:
