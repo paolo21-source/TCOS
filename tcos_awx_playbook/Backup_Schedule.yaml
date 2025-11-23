@@ -2,6 +2,7 @@
 # ============================================
 # Playbook AWX: Manage Cinder Volume Backup Schedule (MULTI-TENANT)
 # Supporta: enable, disable, activate, deactivate
+# VERSIONE SEMPLIFICATA - senza verifica schedule esistenti
 # ============================================
 
 - name: Manage Cinder Volume Backup Schedule
@@ -198,30 +199,7 @@
             volume_exists: true
     
     # =============================================
-    # 5. RECUPERA SCHEDULE ESISTENTI
-    # =============================================
-    
-    - name: Get all schedules from AWX
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/"
-        method: GET
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        return_content: yes
-      register: awx_schedules
-    
-    - name: Filter schedules for this volume
-      set_fact:
-        volume_schedules: "{{ awx_schedules.json.results | selectattr('name', 'search', volume_id) | list }}"
-    
-    - name: Filter active schedules for this volume
-      set_fact:
-        active_schedules: "{{ volume_schedules | selectattr('enabled', 'equalto', true) | list }}"
-    
-    # =============================================
-    # 6. DISPLAY INFO
+    # 5. DISPLAY INFO
     # =============================================
     
     - name: Log action
@@ -233,23 +211,11 @@
           - "Action: {{ backup_action }}"
           - "Volume: {{ volume_name }} ({{ volume_id }})"
           - "Tenant: {{ tenant_name }}"
-          - "Existing schedules: {{ volume_schedules | length }}"
-          - "Active schedules: {{ active_schedules | length }}"
           - "=============================================="
     
     # =============================================
-    # 7. AZIONE: ENABLE (Crea nuovo schedule)
+    # 6. AZIONE: ENABLE (Crea nuovo schedule)
     # =============================================
-    
-    - name: Check if active schedule already exists (for enable action)
-      fail:
-        msg: |
-          ERRORE: Esiste già un backup schedule attivo per questo volume!
-          Nome schedule esistente: {{ active_schedules[0].name }}
-          Per creare un nuovo schedule, prima disattiva o elimina quello esistente.
-      when: 
-        - backup_action == 'enable'
-        - active_schedules | length > 0
     
     - name: Create new backup schedule
       awx.awx.schedule:
@@ -282,7 +248,7 @@
           - "=============================================="
           - "✓ BACKUP SCHEDULE CREATO E ATTIVATO"
           - "=============================================="
-          - "Schedule ID: {{ schedule_create_result.id }}"
+          - "Schedule ID: {{ schedule_create_result.id | default('N/A') }}"
           - "Nome: Giornaliero - {{ backup_name }} - {{ tenant_name }}"
           - "Volume: {{ volume_name }} ({{ volume_id }})"
           - "Tenant: {{ tenant_name }}"
@@ -294,133 +260,10 @@
         - schedule_create_result is defined
     
     # =============================================
-    # 8. AZIONE: DISABLE (Elimina tutti gli schedule)
+    # 7. AZIONE: DISABLE, ACTIVATE, DEACTIVATE
     # =============================================
     
-    - name: Delete all schedules for this volume
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/{{ item.id }}/"
-        method: DELETE
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        status_code: [204, 404]
-      loop: "{{ volume_schedules }}"
-      when: 
-        - backup_action == "disable"
-        - volume_schedules | length > 0
-      ignore_errors: true
-    
-    - name: Show success message (disable)
+    - name: Info message for other actions
       debug:
-        msg: 
-          - "=============================================="
-          - "✓ BACKUP SCHEDULE ELIMINATI"
-          - "=============================================="
-          - "Volume: {{ volume_name }} ({{ volume_id }})"
-          - "Tenant: {{ tenant_name }}"
-          - "Schedules eliminati: {{ volume_schedules | length }}"
-          - "=============================================="
-      when: backup_action == "disable"
-    
-    - name: No schedules to delete
-      debug:
-        msg: "Nessuno schedule trovato da eliminare per questo volume"
-      when: 
-        - backup_action == "disable"
-        - volume_schedules | length == 0
-    
-    # =============================================
-    # 9. AZIONE: ACTIVATE (Attiva schedule esistente)
-    # =============================================
-    
-    - name: Get schedule details
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
-        method: GET
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        return_content: yes
-      register: schedule_details
-      when: backup_action == "activate"
-    
-    - name: Activate schedule
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
-        method: PATCH
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        body_format: json
-        body:
-          enabled: true
-        status_code: [200, 204]
-      when: backup_action == "activate"
-      register: activate_result
-    
-    - name: Show success message (activate)
-      debug:
-        msg: 
-          - "=============================================="
-          - "✓ BACKUP SCHEDULE ATTIVATO"
-          - "=============================================="
-          - "Schedule ID: {{ schedule_id }}"
-          - "Nome: {{ schedule_details.json.name }}"
-          - "Volume: {{ volume_name }} ({{ volume_id }})"
-          - "Tenant: {{ tenant_name }}"
-          - "Prossima esecuzione: {{ schedule_details.json.next_run | default('N/A') }}"
-          - "=============================================="
-      when: 
-        - backup_action == "activate"
-        - activate_result is defined
-    
-    # =============================================
-    # 10. AZIONE: DEACTIVATE (Disattiva schedule esistente)
-    # =============================================
-    
-    - name: Get schedule details for deactivate
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
-        method: GET
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        return_content: yes
-      register: schedule_details_deactivate
-      when: backup_action == "deactivate"
-    
-    - name: Deactivate schedule
-      uri:
-        url: "{{ awx_host }}/api/v2/schedules/{{ schedule_id }}/"
-        method: PATCH
-        user: "{{ awx_user }}"
-        password: "{{ awx_password }}"
-        force_basic_auth: yes
-        validate_certs: "{{ awx_validate_certs }}"
-        body_format: json
-        body:
-          enabled: false
-        status_code: [200, 204]
-      when: backup_action == "deactivate"
-      register: deactivate_result
-    
-    - name: Show success message (deactivate)
-      debug:
-        msg: 
-          - "=============================================="
-          - "✓ BACKUP SCHEDULE DISATTIVATO"
-          - "=============================================="
-          - "Schedule ID: {{ schedule_id }}"
-          - "Nome: {{ schedule_details_deactivate.json.name }}"
-          - "Volume: {{ volume_name }} ({{ volume_id }})"
-          - "Tenant: {{ tenant_name }}"
-          - "Lo schedule è stato disattivato ma non eliminato"
-          - "=============================================="
-      when: 
-        - backup_action == "deactivate"
-        - deactivate_result is defined
+        msg: "Azioni disable/activate/deactivate non implementate in questa versione semplificata"
+      when: backup_action in ['disable', 'activate', 'deactivate']
