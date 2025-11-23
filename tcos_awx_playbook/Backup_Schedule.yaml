@@ -9,8 +9,12 @@
   connection: local
   gather_facts: true
   environment:
-    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,.local"
-    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,.local"
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    no_proxy: "*"
+    NO_PROXY: "*"
     
   vars:
     awx_host: "http://awx.k8s-prod.tcosmilano.local"
