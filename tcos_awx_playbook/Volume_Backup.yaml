@@ -8,6 +8,13 @@
   hosts: localhost
   connection: local
   gather_facts: true
+  environment:
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    no_proxy: "*"
+    NO_PROXY: "*"
   
   tasks:
     # =============================================
