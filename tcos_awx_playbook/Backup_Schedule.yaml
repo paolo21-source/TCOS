@@ -9,8 +9,8 @@
   connection: local
   gather_facts: true
   environment:
-    no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local"
-    NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local"
+    no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local,awx.k8s-prod.tcosmilano.local"
+    NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local,awx.k8s-prod.tcosmilano.local"
     
   vars:
     awx_host: "http://awx.k8s-prod.tcosmilano.local"
@@ -133,16 +133,22 @@
         msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }} | Project ID: {{ project_id_for_api }}"
     
     # =============================================
-    # 3. ESTRAI ENDPOINT CINDER DAL CATALOGO
+    # 3. ESTRAI ENDPOINT CINDER E CORREGGI IP
     # =============================================
     
     - name: Extract Cinder endpoint from service catalog
       set_fact:
-        cinder_endpoint: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
+        cinder_endpoint_original: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
+        
+    - name: Fix Cinder endpoint to use correct IP
+      set_fact:
+        cinder_endpoint: "{{ cinder_endpoint_original | regex_replace('172\\.16\\.17\\.253', '10.1.98.150') | regex_replace('https://region-milano\\.linuxwall\\.it', 'https://10.1.98.150') }}"
       
     - name: Log Cinder endpoint
       debug:
-        msg: "Cinder endpoint: {{ cinder_endpoint }}"
+        msg: 
+          - "Cinder endpoint originale: {{ cinder_endpoint_original }}"
+          - "Cinder endpoint corretto: {{ cinder_endpoint }}"
     
     # =============================================
     # 4. VERIFICA ESISTENZA VOLUME (con API REST)
@@ -159,6 +165,7 @@
               Accept: "application/json"
             validate_certs: no
             status_code: [200, 404]
+            timeout: 10
           register: volume_response
         
         - name: Set volume data from API response
