@@ -80,12 +80,14 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+      environment:
+        no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
+        NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
       register: auth_with_id
       when: use_project_id | bool
 
     - name: Authenticate with project name
       uri:
-        use_proxy: false
         url: "{{ openstack_auth_url }}/v3/auth/tokens"
         method: POST
         body:
@@ -107,6 +109,9 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+      environment:
+        no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
+        NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
       register: auth_with_name
       when: not (use_project_id | bool)
 
@@ -142,6 +147,9 @@
               project_name: "{{ openstack_project_name | default(omit) }}"
               domain_name: "{{ openstack_domain_name | default('Default') }}"
             details: true
+          environment:
+            no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
+            NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1"
           register: all_volumes
         
         - name: Find volume by ID
