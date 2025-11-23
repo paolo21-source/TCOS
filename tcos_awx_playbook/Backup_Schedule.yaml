@@ -9,11 +9,11 @@
   connection: local
   gather_facts: true
   environment:
-    no_proxy: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local,awx.k8s-prod.tcosmilano.local"
-    NO_PROXY: "172.16.17.253,10.1.98.150,localhost,127.0.0.1,.local,awx.k8s-prod.tcosmilano.local"
+    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,.local"
+    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,.local"
     
   vars:
-    awx_host: "http://awx.k8s-prod.tcosmilano.local"
+    awx_host: "http://10.1.98.74"
     awx_validate_certs: false
     retention_days: 15
   vars_files:
