@@ -123,56 +123,63 @@
     - name: Set final tenant name
       set_fact:
         tenant_name: "{{ openstack_project_name | default(auth_response.json.token.project.name) }}"
+        
+    - name: Set project ID for API calls
+      set_fact:
+        project_id_for_api: "{{ openstack_project_id if (openstack_project_id is defined and openstack_project_id != '') else auth_response.json.token.project.id }}"
 
     - name: Log successful authentication
       debug:
-        msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }}"
+        msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }} | Project ID: {{ project_id_for_api }}"
     
     # =============================================
-    # 3. VERIFICA ESISTENZA VOLUME (con autenticazione)
+    # 3. ESTRAI ENDPOINT CINDER DAL CATALOGO
+    # =============================================
+    
+    - name: Extract Cinder endpoint from service catalog
+      set_fact:
+        cinder_endpoint: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
+      
+    - name: Log Cinder endpoint
+      debug:
+        msg: "Cinder endpoint: {{ cinder_endpoint }}"
+    
+    # =============================================
+    # 4. VERIFICA ESISTENZA VOLUME (con API REST)
     # =============================================
     
     - name: Check if volume exists in OpenStack
       block:
-        - name: Get volume info with explicit auth
-          openstack.cloud.volume_info:
-            auth:
-              auth_url: "{{ openstack_auth_url }}"
-              username: "{{ openstack_username }}"
-              password: "{{ openstack_password }}"
-              project_id: "{{ openstack_project_id | default(omit) }}"
-              project_name: "{{ openstack_project_name | default(omit) }}"
-              domain_name: "{{ openstack_domain_name | default('Default') }}"
-            details: true
-          register: all_volumes
+        - name: Get volume info via Cinder API
+          uri:
+            url: "{{ cinder_endpoint }}/volumes/{{ volume_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+              Accept: "application/json"
+            validate_certs: no
+            status_code: [200, 404]
+          register: volume_response
         
-        - name: Find volume by ID
+        - name: Set volume data from API response
           set_fact:
-            volume_data: "{{ all_volumes.volumes | selectattr('id', 'equalto', volume_id) | first | default(None) }}"
-        
-        - name: Check if volume was found
-          set_fact:
-            volume_exists: "{{ volume_data is not none }}"
-        
-        - name: Set volume name from OpenStack
-          set_fact:
-            volume_name: "{{ volume_data.name }}"
-          when: volume_exists
+            volume_exists: "{{ volume_response.status == 200 }}"
+            volume_name: "{{ volume_response.json.volume.name if volume_response.status == 200 else (backup_name | default('volume_' ~ volume_id[:8])) }}"
         
         - name: Display success - volume found
           debug:
             msg: " Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
           when: volume_exists
         
-        - name: Fail if volume doesn't exist
-          fail:
-            msg: " Volume {{ volume_id }} non trovato nel tenant {{ tenant_name }}"
+        - name: Display warning - volume not found
+          debug:
+            msg: " Volume {{ volume_id }} non trovato - uso nome fallback: {{ volume_name }}"
           when: not volume_exists
       
       rescue:
         - name: Handle OpenStack API error
           debug:
-            msg: " Errore accesso OpenStack API - impossibile verificare esistenza volume"
+            msg: " Errore accesso Cinder API - impossibile verificare esistenza volume"
         
         - name: Use fallback volume name
           set_fact:
@@ -180,7 +187,7 @@
             volume_exists: true
     
     # =============================================
-    # 4. RECUPERA SCHEDULE ESISTENTI
+    # 5. RECUPERA SCHEDULE ESISTENTI
     # =============================================
     
     - name: Get all schedules from AWX
@@ -203,7 +210,7 @@
         active_schedules: "{{ volume_schedules | selectattr('enabled', 'equalto', true) | list }}"
     
     # =============================================
-    # 5. DISPLAY INFO
+    # 6. DISPLAY INFO
     # =============================================
     
     - name: Log action
@@ -220,7 +227,7 @@
           - "=============================================="
     
     # =============================================
-    # 6. AZIONE: ENABLE (Crea nuovo schedule)
+    # 7. AZIONE: ENABLE (Crea nuovo schedule)
     # =============================================
     
     - name: Check if active schedule already exists (for enable action)
@@ -276,7 +283,7 @@
         - schedule_create_result is defined
     
     # =============================================
-    # 7. AZIONE: DISABLE (Elimina tutti gli schedule)
+    # 8. AZIONE: DISABLE (Elimina tutti gli schedule)
     # =============================================
     
     - name: Delete all schedules for this volume
@@ -314,7 +321,7 @@
         - volume_schedules | length == 0
     
     # =============================================
-    # 8. AZIONE: ACTIVATE (Attiva schedule esistente)
+    # 9. AZIONE: ACTIVATE (Attiva schedule esistente)
     # =============================================
     
     - name: Get schedule details
@@ -361,7 +368,7 @@
         - activate_result is defined
     
     # =============================================
-    # 9. AZIONE: DEACTIVATE (Disattiva schedule esistente)
+    # 10. AZIONE: DEACTIVATE (Disattiva schedule esistente)
     # =============================================
     
     - name: Get schedule details for deactivate
