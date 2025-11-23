@@ -9,9 +9,12 @@
   hosts: localhost
   connection: local
   gather_facts: true
+  environment:
+    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,.local,.svc,.svc.cluster.local,awx-prod-service.awx.svc"
+    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,.local,.svc,.svc.cluster.local,awx-prod-service.awx.svc"
   
   vars:
-    awx_host: "http://awx.k8s-prod.tcosmilano.local"
+    awx_host: "http://awx-prod-service.awx.svc:80"
     awx_validate_certs: false
   vars_files:
     - vars/awx_credentials.yaml
@@ -78,7 +81,7 @@
     - name: Check tenant match
       fail:
         msg: |
-           ERRORE DI SICUREZZA: Lo schedule non appartiene al tenant selezionato!
+          ⚠️ ERRORE DI SICUREZZA: Lo schedule non appartiene al tenant selezionato!
           
       when: 
         - schedule_tenant is defined
@@ -86,7 +89,7 @@
     
     - name: Log tenant verification success
       debug:
-        msg: " Verifica tenant OK - Lo schedule appartiene al tenant {{ tenant_name }}"
+        msg: "✓ Verifica tenant OK - Lo schedule appartiene al tenant {{ tenant_name }}"
     
     # =============================================
     # 4. AZIONE: ACTIVATE
@@ -143,7 +146,7 @@
       debug:
         msg:
           - "=============================================="
-          - " BACKUP SCHEDULE DISATTIVATO"
+          - "✓ BACKUP SCHEDULE DISATTIVATO"
           - "=============================================="
           - "Schedule: {{ schedule_details.json.name }}"
           - "Volume ID: {{ volume_id }}"
@@ -172,7 +175,7 @@
       debug:
         msg:
           - "=============================================="
-          - " BACKUP SCHEDULE ELIMINATO"
+          - "✓ BACKUP SCHEDULE ELIMINATO"
           - "=============================================="
           - "Schedule: {{ schedule_details.json.name }}"
           - "Volume ID: {{ volume_id }}"
