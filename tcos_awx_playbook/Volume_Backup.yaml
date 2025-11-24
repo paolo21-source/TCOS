@@ -2,6 +2,7 @@
 # ============================================
 # Playbook AWX: Cinder Volume Backup (One-Shot) - MULTI-TENANT
 # Eseguito dallo schedule per fare backup automatici
+# VERSIONE CON API REST (no openstack.cloud)
 # ============================================
 
 - name: Create Cinder Volume Backup
@@ -9,12 +10,8 @@
   connection: local
   gather_facts: true
   environment:
-    HTTP_PROXY: ""
-    HTTPS_PROXY: ""
-    http_proxy: ""
-    https_proxy: ""
-    no_proxy: "*"
-    NO_PROXY: "*"
+    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local"
+    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local"
   
   tasks:
     # =============================================
@@ -44,7 +41,7 @@
 
     - name: Log authentication
       debug:
-        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+        msg: "🔐 Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -67,6 +64,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_id
       when: use_project_id | bool
 
@@ -93,6 +91,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_name
       when: not (use_project_id | bool)
 
@@ -106,33 +105,48 @@
 
     - name: Log successful authentication
       debug:
-        msg: " Autenticato su OpenStack | Tenant: {{ tenant_name }}"
+        msg: "✓ Autenticato su OpenStack | Tenant: {{ tenant_name }}"
     
     # =============================================
-    # 3. VERIFICA ESISTENZA VOLUME
+    # 3. ESTRAI E CORREGGI ENDPOINT CINDER
     # =============================================
     
-    - name: Check if volume exists in OpenStack
+    - name: Extract Cinder endpoint from service catalog
+      set_fact:
+        cinder_endpoint_original: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
+        
+    - name: Fix Cinder endpoint to use correct IP
+      set_fact:
+        cinder_endpoint: "{{ cinder_endpoint_original | regex_replace('172\\.16\\.17\\.253', '10.1.98.150') | regex_replace('https://region-milano\\.linuxwall\\.it', 'https://10.1.98.150') }}"
+      
+    - name: Log Cinder endpoint
+      debug:
+        msg: 
+          - "Cinder endpoint originale: {{ cinder_endpoint_original }}"
+          - "Cinder endpoint corretto: {{ cinder_endpoint }}"
+    
+    # =============================================
+    # 4. VERIFICA ESISTENZA VOLUME (API REST)
+    # =============================================
+    
+    - name: Check if volume exists via Cinder API
       block:
-        - name: Get volume info with explicit auth
-          openstack.cloud.volume_info:
-            auth:
-              auth_url: "{{ openstack_auth_url }}"
-              username: "{{ openstack_username }}"
-              password: "{{ openstack_password }}"
-              project_id: "{{ openstack_project_id | default(omit) }}"
-              project_name: "{{ openstack_project_name | default(omit) }}"
-              domain_name: "{{ openstack_domain_name | default('Default') }}"
-            details: true
-          register: all_volumes
+        - name: Get volume info via Cinder API
+          uri:
+            url: "{{ cinder_endpoint }}/volumes/{{ volume_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+              Accept: "application/json"
+            validate_certs: no
+            status_code: [200, 404]
+            timeout: 10
+          register: volume_response
         
-        - name: Find volume by ID
+        - name: Set volume data from API response
           set_fact:
-            volume_data: "{{ all_volumes.volumes | selectattr('id', 'equalto', volume_id) | first | default(None) }}"
-        
-        - name: Check if volume was found
-          set_fact:
-            volume_exists: "{{ volume_data is not none }}"
+            volume_exists: "{{ volume_response.status == 200 }}"
+            volume_name: "{{ volume_response.json.volume.name if volume_response.status == 200 else (backup_name | default('volume_' ~ volume_id[:8])) }}"
         
         - name: Exit if volume doesn't exist
           when: not volume_exists
@@ -141,7 +155,7 @@
               debug:
                 msg:
                   - "=============================================="
-                  - " VOLUME NON TROVATO"
+                  - "⚠️ VOLUME NON TROVATO"
                   - "=============================================="
                   - "Volume ID: {{ volume_id }}"
                   - "Tenant: {{ tenant_name }}"
@@ -154,20 +168,15 @@
             - name: End playbook successfully (volume doesn't exist)
               meta: end_play
         
-        - name: Set volume name from OpenStack
-          set_fact:
-            volume_name: "{{ volume_data.name }}"
-          when: volume_exists
-        
         - name: Display success - volume found
           debug:
-            msg: " Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
+            msg: "✓ Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
           when: volume_exists
       
       rescue:
-        - name: Handle OpenStack API error
+        - name: Handle Cinder API error
           debug:
-            msg: " Errore accesso OpenStack API - impossibile verificare esistenza volume"
+            msg: "⚠️ Errore accesso Cinder API - impossibile verificare esistenza volume"
         
         - name: Use fallback volume name
           set_fact:
@@ -175,7 +184,7 @@
             volume_exists: true
     
     # =============================================
-    # 4. GENERA NOME BACKUP FINALE
+    # 5. GENERA NOME BACKUP FINALE
     # Format: anno_mese_giorno_nome_backup_tenant
     # =============================================
     
@@ -206,7 +215,7 @@
         final_backup_name: "{{ date_prefix }}_{{ clean_backup_name }}_{{ clean_tenant_name }}"
     
     # =============================================
-    # 5. DISPLAY INFO
+    # 6. DISPLAY INFO
     # =============================================
     
     - name: Display backup info
@@ -228,70 +237,84 @@
           - "=============================================="
     
     # =============================================
-    # 6. CREA BACKUP (con autenticazione esplicita)
+    # 7. CREA BACKUP (API REST)
     # =============================================
     
-    - name: Create volume backup
-      openstack.cloud.volume_backup:
-        auth:
-          auth_url: "{{ openstack_auth_url }}"
-          username: "{{ openstack_username }}"
-          password: "{{ openstack_password }}"
-          project_id: "{{ openstack_project_id | default(omit) }}"
-          project_name: "{{ openstack_project_name | default(omit) }}"
-          domain_name: "{{ openstack_domain_name | default('Default') }}"
-        volume: "{{ volume_id }}"
-        state: present
-        force: true
-        name: "{{ final_backup_name }}"
-        description: "Backup automatico daily - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }}"
-      register: backup_result
+    - name: Create volume backup via Cinder API
+      uri:
+        url: "{{ cinder_endpoint }}/backups"
+        method: POST
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body:
+          backup:
+            volume_id: "{{ volume_id }}"
+            name: "{{ final_backup_name }}"
+            description: "Backup automatico daily - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }}"
+            force: true
+        body_format: json
+        validate_certs: no
+        status_code: [202]
+        timeout: 10
+      register: backup_create_response
+    
+    - name: Extract backup ID
+      set_fact:
+        backup_id: "{{ backup_create_response.json.backup.id }}"
+    
+    - name: Display backup creation initiated
+      debug:
+        msg: "⏳ Backup avviato - ID: {{ backup_id }}"
+    
+    # =============================================
+    # 8. ATTENDI COMPLETAMENTO BACKUP
+    # =============================================
     
     - name: Wait for backup to complete
-      openstack.cloud.volume_backup_info:
-        auth:
-          auth_url: "{{ openstack_auth_url }}"
-          username: "{{ openstack_username }}"
-          password: "{{ openstack_password }}"
-          project_id: "{{ openstack_project_id | default(omit) }}"
-          project_name: "{{ openstack_project_name | default(omit) }}"
-          domain_name: "{{ openstack_domain_name | default('Default') }}"
-        name: "{{ final_backup_name }}"
-      register: backup_status
-      until: backup_status.volume_backups[0].status in ['available', 'error']
+      uri:
+        url: "{{ cinder_endpoint }}/backups/{{ backup_id }}"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+          Accept: "application/json"
+        validate_certs: no
+        status_code: [200]
+        timeout: 10
+      register: backup_status_response
+      until: backup_status_response.json.backup.status in ['available', 'error']
       retries: 60
       delay: 10
-      when: backup_result is defined
     
     - name: Check backup status
       fail:
-        msg: "Backup failed with status: {{ backup_status.volume_backups[0].status }}"
-      when: 
-        - backup_status is defined
-        - backup_status.volume_backups[0].status == 'error'
+        msg: "❌ Backup failed with status: {{ backup_status_response.json.backup.status }}"
+      when: backup_status_response.json.backup.status == 'error'
     
     - name: Display backup creation success
       debug:
         msg: "✓ Backup creato con successo: {{ final_backup_name }}"
     
     # =============================================
-    # 7. GESTIONE RETENTION (con autenticazione esplicita)
+    # 9. GESTIONE RETENTION (API REST)
     # =============================================
     
-    - name: Get all backups for this volume
-      openstack.cloud.volume_backup_info:
-        auth:
-          auth_url: "{{ openstack_auth_url }}"
-          username: "{{ openstack_username }}"
-          password: "{{ openstack_password }}"
-          project_id: "{{ openstack_project_id | default(omit) }}"
-          project_name: "{{ openstack_project_name | default(omit) }}"
-          domain_name: "{{ openstack_domain_name | default('Default') }}"
-      register: all_backups
+    - name: Get all backups via Cinder API
+      uri:
+        url: "{{ cinder_endpoint }}/backups/detail"
+        method: GET
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+          Accept: "application/json"
+        validate_certs: no
+        status_code: [200]
+        timeout: 10
+      register: all_backups_response
     
     - name: Filter backups for this volume only
       set_fact:
-        volume_backups: "{{ all_backups.volume_backups | selectattr('volume_id', 'equalto', volume_id) | list }}"
+        volume_backups: "{{ all_backups_response.json.backups | selectattr('volume_id', 'equalto', volume_id) | list }}"
     
     - name: Sort backups by creation date (oldest first)
       set_fact:
@@ -319,23 +342,21 @@
           - "Backup totali per questo volume: {{ volume_backups | length }}"
           - "Backup da eliminare (retention): {{ old_backups | length }}"
     
-    - name: Delete old backups
-      openstack.cloud.volume_backup:
-        auth:
-          auth_url: "{{ openstack_auth_url }}"
-          username: "{{ openstack_username }}"
-          password: "{{ openstack_password }}"
-          project_id: "{{ openstack_project_id | default(omit) }}"
-          project_name: "{{ openstack_project_name | default(omit) }}"
-          domain_name: "{{ openstack_domain_name | default('Default') }}"
-        name: "{{ item.id }}"
-        state: absent
+    - name: Delete old backups via Cinder API
+      uri:
+        url: "{{ cinder_endpoint }}/backups/{{ item.id }}"
+        method: DELETE
+        headers:
+          X-Auth-Token: "{{ os_auth_token }}"
+        validate_certs: no
+        status_code: [202, 404]
+        timeout: 10
       loop: "{{ old_backups }}"
       when: old_backups | length > 0
       ignore_errors: true
     
     # =============================================
-    # 8. SUMMARY
+    # 10. SUMMARY
     # =============================================
     
     - name: Show success message
@@ -345,10 +366,10 @@
           - "✓ BACKUP COMPLETATO CON SUCCESSO"
           - "=============================================="
           - "Backup Name: {{ final_backup_name }}"
-          - "Backup ID: {{ backup_result.backup.id | default('N/A') }}"
+          - "Backup ID: {{ backup_id }}"
           - "Volume: {{ volume_name }} ({{ volume_id }})"
           - "Tenant: {{ tenant_name }}"
-          - "Status: {{ backup_status.volume_backups[0].status | default('unknown') }}"
+          - "Status: {{ backup_status_response.json.backup.status }}"
           - "---"
           - "Backup totali per questo volume: {{ volume_backups | length }}"
           - "Backup eliminati (retention): {{ old_backups | length }}"
