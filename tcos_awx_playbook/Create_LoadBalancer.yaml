@@ -1,8 +1,12 @@
+---
 - name: Create OpenStack Load Balancer L4 - Complete
   hosts: localhost
   gather_facts: no
   collections:
     - openstack.cloud
+  environment:
+    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it,.cloudopen.tim.it"
+    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it,.cloudopen.tim.it"
   
   vars:
     # Nomi derivati automaticamente
@@ -45,7 +49,7 @@
           - openstack_username is defined
           - openstack_password is defined
           - openstack_project_id is defined or openstack_project_name is defined
-        fail_msg: " Credenziali OpenStack mancanti!"
+        fail_msg: "⚠️ Credenziali OpenStack mancanti!"
 
     - name: Determine authentication method
       set_fact:
@@ -53,7 +57,7 @@
 
     - name: Log authentication
       debug:
-        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+        msg: "🔐 Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -77,6 +81,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_id
       when: use_project_id | bool
 
@@ -104,6 +109,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_name
       when: not (use_project_id | bool)
 
@@ -121,7 +127,7 @@
 
     - name: Log successful authentication
       debug:
-        msg: " Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+        msg: "✓ Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
 
     # ========================================
     # CONFIGURE OPENSTACK CLIENT ENVIRONMENT
@@ -240,7 +246,7 @@
 
         - name: Log Load Balancer creation
           debug:
-            msg: "Load Balancer '{{ lb_name }}' creato! ID: {{ lb_id }}, VIP: {{ lb_vip_address }}"
+            msg: "✓ Load Balancer '{{ lb_name }}' creato! ID: {{ lb_id }}, VIP: {{ lb_vip_address }}"
 
         # ========================================
         # NOTIFICA 2: LOAD BALANCER CREATO
@@ -256,7 +262,7 @@
               action: "create"
               resource:
                 level: "info"
-                message: "Load Balancer '{{ lb_name }}' creato | VIP: {{ lb_vip_address }} | ID: {{ lb_id }}"
+                message: "✓ Load Balancer '{{ lb_name }}' creato | VIP: {{ lb_vip_address }} | ID: {{ lb_id }}"
                 subject_type: "User"
                 subject_id: "{{ manageiq_user_id }}"
             body_format: json
@@ -291,7 +297,7 @@
 
         - name: Log Listener creation
           debug:
-            msg: "Listener '{{ listener_name }}' creato! Protocollo: {{ listener_protocol }}, Porta: {{ listener_port }}"
+            msg: "✓ Listener '{{ listener_name }}' creato! Protocollo: {{ listener_protocol }}, Porta: {{ listener_port }}"
 
         # ========================================
         # NOTIFICA 3: LISTENER CREATO
@@ -307,7 +313,7 @@
               action: "create"
               resource:
                 level: "info"
-                message: "Listener '{{ listener_name }}' configurato | Protocollo: {{ listener_protocol }} | Porta: {{ listener_port }}"
+                message: "✓ Listener '{{ listener_name }}' configurato | Protocollo: {{ listener_protocol }} | Porta: {{ listener_port }}"
                 subject_type: "User"
                 subject_id: "{{ manageiq_user_id }}"
             body_format: json
@@ -339,7 +345,7 @@
 
         - name: Log Pool creation
           debug:
-            msg: "Pool '{{ pool_name }}' creato! Algoritmo: {{ pool_algorithm }}"
+            msg: "✓ Pool '{{ pool_name }}' creato! Algoritmo: {{ pool_algorithm }}"
 
         # ========================================
         # PARSE AND ADD POOL MEMBERS (Optional - 0 to N)
@@ -380,7 +386,7 @@
 
             - name: Log members added
               debug:
-                msg: "Aggiunti {{ pool_members_list | default([]) | length }} membri al pool '{{ pool_name }}'"
+                msg: "✓ Aggiunti {{ pool_members_list | default([]) | length }} membri al pool '{{ pool_name }}'"
               when: pool_members_list is defined
 
             # ========================================
@@ -397,7 +403,7 @@
                   action: "create"
                   resource:
                     level: "info"
-                    message: "Pool '{{ pool_name }}' configurato | Algoritmo: {{ pool_algorithm }} | Membri: {{ pool_members_list | default([]) | length }}"
+                    message: "✓ Pool '{{ pool_name }}' configurato | Algoritmo: {{ pool_algorithm }} | Membri: {{ pool_members_list | default([]) | length }}"
                     subject_type: "User"
                     subject_id: "{{ manageiq_user_id }}"
                 body_format: json
@@ -416,7 +422,7 @@
           when: 
             - backend_servers is not defined or backend_servers | length == 0
           debug:
-            msg: "Pool creato senza membri. Potrai aggiungerne in seguito tramite OpenStack."
+            msg: "ℹ️ Pool creato senza membri. Potrai aggiungerne in seguito tramite OpenStack."
 
         # ========================================
         # CREATE HEALTH MONITOR (Optional)
@@ -448,7 +454,7 @@
 
             - name: Log Health Monitor creation
               debug:
-                msg: "Health Monitor '{{ monitor_name }}' creato! Tipo: {{ monitor_type }}"
+                msg: "✓ Health Monitor '{{ monitor_name }}' creato! Tipo: {{ monitor_type }}"
 
             # ========================================
             # NOTIFICA 5: HEALTH MONITOR CREATO
@@ -464,7 +470,7 @@
                   action: "create"
                   resource:
                     level: "info"
-                    message: "Health Monitor '{{ monitor_name }}' configurato | Tipo: {{ monitor_type }} | Delay: {{ monitor_delay }}s"
+                    message: "✓ Health Monitor '{{ monitor_name }}' configurato | Tipo: {{ monitor_type }} | Delay: {{ monitor_delay }}s"
                     subject_type: "User"
                     subject_id: "{{ manageiq_user_id }}"
                 body_format: json
@@ -480,7 +486,7 @@
 
         - name: Log Health Monitor skipped
           debug:
-            msg: "Health Monitor non configurato (parametri mancanti o disabilitato)"
+            msg: "ℹ️ Health Monitor non configurato (parametri mancanti o disabilitato)"
           when: 
             - not (create_health_monitor | bool) or
               monitor_type is not defined or
@@ -517,7 +523,7 @@
 
             - name: Log Floating IP assignment
               debug:
-                msg: "Floating IP {{ lb_floating_ip }} assegnato al Load Balancer"
+                msg: "✓ Floating IP {{ lb_floating_ip }} assegnato al Load Balancer"
 
             # ========================================
             # NOTIFICA 6: FLOATING IP ASSEGNATO
@@ -533,7 +539,7 @@
                   action: "create"
                   resource:
                     level: "info"
-                    message: "Floating IP {{ lb_floating_ip }} assegnato al Load Balancer '{{ lb_name }}'"
+                    message: "✓ Floating IP {{ lb_floating_ip }} assegnato al Load Balancer '{{ lb_name }}'"
                     subject_type: "User"
                     subject_id: "{{ manageiq_user_id }}"
                 body_format: json
@@ -576,8 +582,8 @@
 
         - name: Log cleanup
           debug:
-            msg: "Errore rilevato. Risorse parzialmente create eliminate."
+            msg: "⚠️ Errore rilevato. Risorse parzialmente create eliminate."
 
         - name: Fail the playbook
           fail:
-            msg: "Creazione Load Balancer L4 fallita: {{ ansible_failed_task.name | default('operazione sconosciuta') }}"
+            msg: "❌ Creazione Load Balancer L4 fallita: {{ ansible_failed_task.name | default('operazione sconosciuta') }}"
