@@ -2,6 +2,11 @@
 - name: Delete OpenStack Load Balancer
   hosts: localhost
   gather_facts: no
+  collections:
+    - openstack.cloud
+  environment:
+    no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it,.cloudopen.tim.it"
+    NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it,.cloudopen.tim.it"
   
   vars:
     delete_floatingips: "{{ delete_floatingips | default(false) }}"
@@ -19,11 +24,11 @@
           - openstack_username is defined
           - openstack_password is defined
           - (openstack_project_name is defined) or (openstack_project_id is defined)
-        fail_msg: "ERRORE: Variabili richieste mancanti!"
+        fail_msg: "⚠️ ERRORE: Variabili richieste mancanti!"
 
     - name: Log start
       debug:
-        msg: "  ELIMINAZIONE Load Balancer ID: {{ loadbalancer_id }}"
+        msg: "🗑️ ELIMINAZIONE Load Balancer ID: {{ loadbalancer_id }}"
 
     # ========================================
     # NOTIFICA: INIZIO
@@ -39,7 +44,7 @@
           action: "update"
           resource:
             level: "warning"
-            message: "  Eliminazione Load Balancer in corso..."
+            message: "⚠️ Eliminazione Load Balancer in corso..."
             subject_type: "User"
             subject_id: "{{ manageiq_user_id }}"
         body_format: json
@@ -61,7 +66,7 @@
           - openstack_username is defined
           - openstack_password is defined
           - openstack_project_id is defined or openstack_project_name is defined
-        fail_msg: " Credenziali OpenStack mancanti!"
+        fail_msg: "⚠️ Credenziali OpenStack mancanti!"
 
     - name: Determine authentication method
       set_fact:
@@ -69,7 +74,7 @@
 
     - name: Log authentication
       debug:
-        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+        msg: "🔐 Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -93,6 +98,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_id
       when: use_project_id | bool
 
@@ -120,6 +126,7 @@
         status_code: 201
         return_content: yes
         validate_certs: no
+        timeout: 10
       register: auth_with_name
       when: not (use_project_id | bool)
 
@@ -137,7 +144,25 @@
 
     - name: Log successful authentication
       debug:
-        msg: " Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+        msg: "✓ Autenticato su OpenStack | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+
+    # ========================================
+    # CONFIGURE OPENSTACK CLIENT ENVIRONMENT
+    # ========================================
+    - name: Set OpenStack authentication environment
+      set_fact:
+        openstack_auth:
+          auth_url: "{{ openstack_auth_url }}"
+          username: "{{ openstack_username }}"
+          password: "{{ openstack_password }}"
+          project_id: "{{ openstack_project_id if (openstack_project_id is defined and openstack_project_id != '') else omit }}"
+          project_name: "{{ openstack_project_name if (openstack_project_id is not defined or openstack_project_id == '') else omit }}"
+          user_domain_name: "{{ openstack_domain_name | default('Default') }}"
+          project_domain_name: "{{ openstack_domain_name | default('Default') }}"
+
+    - name: Log OpenStack configuration
+      debug:
+        msg: "🔧 Configurazione OpenStack per moduli cloud | Project: {{ openstack_project_name | default(openstack_project_id) }}"
 
     # ========================================
     # FIND OCTAVIA ENDPOINT
@@ -155,12 +180,12 @@
 
     - name: Fail if Octavia not found
       fail:
-        msg: " Servizio Octavia non trovato"
+        msg: "❌ Servizio Octavia non trovato"
       when: octavia_url is not defined or octavia_url == ""
 
     - name: Log Octavia endpoint
       debug:
-        msg: " Octavia: {{ octavia_url }}"
+        msg: "🔗 Octavia: {{ octavia_url }}"
 
     # ========================================
     # GET LOAD BALANCER INFO
@@ -186,7 +211,7 @@
 
     - name: Log Load Balancer info
       debug:
-        msg: " Load Balancer: {{ lb_name }} (VIP: {{ lb_vip_address }})"
+        msg: "📊 Load Balancer: {{ lb_name }} (VIP: {{ lb_vip_address }})"
 
     # ========================================
     # WAIT FOR LB TO BE ACTIVE
@@ -207,7 +232,7 @@
 
     - name: Log ready for deletion
       debug:
-        msg: " Load Balancer ACTIVE - pronto per eliminazione"
+        msg: "✓ Load Balancer ACTIVE - pronto per eliminazione"
 
     # ========================================
     # GET FLOATING IPS (if delete requested)
@@ -240,7 +265,7 @@
 
     - name: Log Floating IPs found
       debug:
-        msg: " Trovati {{ fips_response.json.floatingips | length }} Floating IP da eliminare"
+        msg: "🌐 Trovati {{ fips_response.json.floatingips | length }} Floating IP da eliminare"
       when: 
         - delete_floatingips | bool
         - fips_response is defined
@@ -260,7 +285,7 @@
 
     - name: Log deletion initiated
       debug:
-        msg: "  Eliminazione Load Balancer avviata (cascade=true)"
+        msg: "🗑️ Eliminazione Load Balancer avviata (cascade=true)"
 
     # ========================================
     # WAIT FOR DELETION TO COMPLETE
@@ -282,7 +307,7 @@
 
     - name: Verify deletion completed
       debug:
-        msg: "Load Balancer eliminato con successo"
+        msg: "✓ Load Balancer eliminato con successo"
       when: lb_delete_check.status == 404
 
     # ========================================
@@ -304,7 +329,7 @@
 
     - name: Log Floating IPs deletion
       debug:
-        msg: " Floating IP eliminati"
+        msg: "🌐 Floating IP eliminati"
       when:
         - delete_floatingips | bool
         - fips_response is defined
@@ -324,12 +349,12 @@
           VIP:           {{ lb_vip_address }}
           
           Eliminato:
-             Load Balancer
-             Listener
-             Pool
-             Membri
-             Health Monitor
-            {{ ' Floating IP' if (delete_floatingips | bool and fips_response is defined and fips_response.json.floatingips | length > 0) else '⏭️  Floating IP (non eliminati)' }}
+            ✓ Load Balancer
+            ✓ Listener
+            ✓ Pool
+            ✓ Membri
+            ✓ Health Monitor
+            {{ '✓ Floating IP' if (delete_floatingips | bool and fips_response is defined and fips_response.json.floatingips | length > 0) else '⏭️  Floating IP (non eliminati)' }}
 
     - name: Send final notification
       uri:
@@ -342,7 +367,7 @@
           action: "update"
           resource:
             level: "success"
-            message: " Load Balancer {{ lb_name }} eliminato con successo"
+            message: "✓ Load Balancer {{ lb_name }} eliminato con successo"
             subject_type: "User"
             subject_id: "{{ manageiq_user_id }}"
         body_format: json
