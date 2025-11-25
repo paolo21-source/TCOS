@@ -12,7 +12,7 @@
     # Nomi derivati automaticamente
     listener_name: "{{ lb_name }}-listener"
     pool_name: "{{ lb_name }}-pool"
-    monitor_name: "{{ monitor_name | default(lb_name + '-monitor') }}"
+    monitor_name: "{{ lb_name }}-monitor"
     
     # Default values
     listener_protocol: "{{ listener_protocol | default('TCP') }}"
