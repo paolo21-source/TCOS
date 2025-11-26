@@ -22,11 +22,11 @@
           - openstack_username is defined
           - openstack_password is defined
           - openstack_project_id is defined or openstack_project_name is defined
-        fail_msg: "⚠️ ERRORE: Variabili richieste mancanti!"
+        fail_msg: " ERRORE: Variabili richieste mancanti!"
 
     - name: Log start
       debug:
-        msg: "🔧 Modifica Load Balancer ID: {{ loadbalancer_id }} | Azione: {{ action }} | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
+        msg: " Modifica Load Balancer ID: {{ loadbalancer_id }} | Azione: {{ action }} | Tenant: {{ openstack_project_name | default(openstack_project_id) }}"
 
     # ========================================
     # NOTIFICA: INIZIO
@@ -42,7 +42,7 @@
           action: "update"
           resource:
             level: "info"
-            message: "🔧 Avvio modifica Load Balancer | Azione: {{ action }}"
+            message: " Avvio modifica Load Balancer | Azione: {{ action }}"
             subject_type: "User"
             subject_id: "{{ manageiq_user_id }}"
         body_format: json
@@ -63,7 +63,7 @@
 
     - name: Log authentication method
       debug:
-        msg: "🔐 Autenticazione: {{ 'Project ID (UUID): ' + openstack_project_id if use_project_id else 'Project Name: ' + openstack_project_name }}"
+        msg: " Autenticazione: {{ 'Project ID (UUID): ' + openstack_project_id if use_project_id else 'Project Name: ' + openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -166,12 +166,12 @@
 
     - name: Fail if Octavia not found
       fail:
-        msg: "❌ Servizio Octavia non trovato nel service catalog"
+        msg: " Servizio Octavia non trovato nel service catalog"
       when: octavia_url is not defined or octavia_url == ""
 
     - name: Log Octavia endpoint
       debug:
-        msg: "🔗 Octavia endpoint: {{ octavia_url }}"
+        msg: " Octavia endpoint: {{ octavia_url }}"
 
     # ========================================
     # GET LOAD BALANCER INFO
@@ -198,7 +198,7 @@
 
     - name: Log Load Balancer info
       debug:
-        msg: "📊 Load Balancer: {{ lb_name }} (VIP: {{ lb_vip_address }}, Status: {{ lb_operating_status }})"
+        msg: " Load Balancer: {{ lb_name }} (VIP: {{ lb_vip_address }}, Status: {{ lb_operating_status }})"
 
     # ========================================
     # AZIONE: UPDATE LOAD BALANCER
@@ -211,7 +211,7 @@
             that:
               - new_lb_name is defined
               - new_lb_name | length > 0
-            fail_msg: "❌ Nome Load Balancer obbligatorio"
+            fail_msg: " Nome Load Balancer obbligatorio"
 
         - name: Build update body for Load Balancer
           set_fact:
@@ -235,7 +235,7 @@
 
         - name: Log update body
           debug:
-            msg: "📝 Update body: {{ lb_update_body }}"
+            msg: " Update body: {{ lb_update_body }}"
 
         - name: Update Load Balancer via API
           uri:
@@ -302,7 +302,7 @@
             that:
               - listener_id is defined
               - listener_id | length > 0
-            fail_msg: "❌ Listener ID obbligatorio"
+            fail_msg: " Listener ID obbligatorio"
 
         - name: Log listener update
           debug:
@@ -384,7 +384,7 @@
 
         - name: Log update body
           debug:
-            msg: "📝 Update body: {{ listener_update_body }}"
+            msg: " Update body: {{ listener_update_body }}"
 
         - name: Update Listener via API
           uri:
@@ -451,11 +451,11 @@
             that:
               - pool_id is defined
               - pool_id | length > 0
-            fail_msg: "❌ Pool ID obbligatorio"
+            fail_msg: " Pool ID obbligatorio"
 
         - name: Log pool update
           debug:
-            msg: "🔧 Aggiornamento Pool ID: {{ pool_id }}"
+            msg: " Aggiornamento Pool ID: {{ pool_id }}"
 
         - name: Build update body for Pool
           set_fact:
@@ -629,7 +629,7 @@
 
         - name: Log update body
           debug:
-            msg: "📝 Update body: {{ hm_update_body }}"
+            msg: " Update body: {{ hm_update_body }}"
 
         - name: Update Health Monitor via API
           uri:
@@ -699,7 +699,7 @@
               - listener_protocol is defined
               - listener_port is defined
               - listener_port | int > 0
-            fail_msg: "❌ Parametri mancanti per create_listener"
+            fail_msg: " Parametri mancanti per create_listener"
 
         - name: Log listener creation
           debug:
@@ -833,7 +833,7 @@
               - pool_name | length > 0
               - pool_protocol is defined
               - pool_lb_algorithm is defined
-            fail_msg: "❌ Parametri mancanti per create_pool"
+            fail_msg: " Parametri mancanti per create_pool"
 
         - name: Log pool creation
           debug:
@@ -1001,7 +1001,7 @@
               - monitor_type is defined
               - monitor_delay is defined
               - monitor_timeout is defined
-            fail_msg: "❌ Parametri mancanti per create_monitor"
+            fail_msg: " Parametri mancanti per create_monitor"
 
         - name: Log health monitor creation
           debug:
@@ -1136,7 +1136,7 @@
               - member_name is defined
               - member_address is defined
               - member_protocol_port is defined
-            fail_msg: "❌ Parametri mancanti per add_internal_member"
+            fail_msg: " Parametri mancanti per add_internal_member"
 
         - name: Log member addition
           debug:
@@ -1258,6 +1258,92 @@
             validate_certs: no
           when: manageiq_notification_url is defined
           ignore_errors: yes
+    # ========================================
+    # AZIONE: REMOVE MEMBER
+    # ========================================
+    - name: Remove member from pool
+      when: action == 'remove_member'
+      block:
+        - name: Validate remove member parameters
+          assert:
+            that:
+              - pool_id is defined
+              - pool_id | length > 0
+              - member_id is defined
+              - member_id | length > 0
+            fail_msg: " Pool ID e Member ID obbligatori per remove_member"
+
+        - name: Log member removal
+          debug:
+            msg: " Rimozione membro {{ member_id }} dal Pool {{ pool_id }}"
+
+        - name: Get member info before deletion
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools/{{ pool_id }}/members/{{ member_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: member_info
+          ignore_errors: yes
+
+        - name: Extract member name
+          set_fact:
+            member_name_to_delete: "{{ member_info.json.member.name | default('Unknown') }}"
+            member_address_to_delete: "{{ member_info.json.member.address | default('') }}"
+          when: member_info is succeeded
+
+        - name: Delete member via API
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools/{{ pool_id }}/members/{{ member_id }}"
+            method: DELETE
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 204
+            validate_certs: no
+          register: member_deleted
+
+        - name: Wait for LB to be ACTIVE after member removal
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
+          retries: 30
+          delay: 5
+
+        - name: Log member removed
+          debug:
+            msg: "✓ Membro '{{ member_name_to_delete }}' rimosso dal pool"
+
+        - name: Notify member removed
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "delete"
+              resource:
+                level: "success"
+                message: "✓ Membro '{{ member_name_to_delete }}' ({{ member_address_to_delete }}) rimosso dal pool"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+            validate_certs: no
+          when: manageiq_notification_url is defined
+          ignore_errors: yes
+
 
     # ========================================
     # FINAL SUMMARY
