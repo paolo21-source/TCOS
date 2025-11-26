@@ -155,7 +155,7 @@
               debug:
                 msg:
                   - "=============================================="
-                  - "⚠️ VOLUME NON TROVATO"
+                  - " VOLUME NON TROVATO"
                   - "=============================================="
                   - "Volume ID: {{ volume_id }}"
                   - "Tenant: {{ tenant_name }}"
@@ -164,7 +164,39 @@
                   - "Il backup schedule dovrebbe essere disabilitato."
                   - "Uscita senza errori per non bloccare lo schedule."
                   - "=============================================="
-            
+            - name: Disable AWX schedule for deleted volume
+              uri:
+                url: "{{ awx_host }}/api/v2/schedules/{{ awx_schedule_id }}/"
+                method: PATCH
+                url_username: "{{ awx_username }}"
+                url_password: "{{ awx_password }}"
+                force_basic_auth: yes
+                headers:
+                  Content-Type: "application/json"
+                body:
+                  enabled: false
+                body_format: json
+                validate_certs: "{{ awx_validate_certs }}"
+                status_code: [200]
+                timeout: 10
+              when: awx_schedule_id is defined and awx_schedule_id != ''
+              register: schedule_disable_result
+              ignore_errors: yes
+    
+            - name: Log schedule disable success
+              debug:
+                msg: "✓ Schedule AWX {{ awx_schedule_id }} disabilitato automaticamente"
+              when: 
+                - schedule_disable_result is defined
+                - schedule_disable_result is succeeded
+    
+            - name: Log schedule disable failure
+              debug:
+                msg: " Impossibile disabilitare schedule AWX - verifica manualmente"
+              when: 
+                - schedule_disable_result is defined
+                - schedule_disable_result is failed
+   
             - name: End playbook successfully (volume doesn't exist)
               meta: end_play
         
@@ -176,7 +208,7 @@
       rescue:
         - name: Handle Cinder API error
           debug:
-            msg: "⚠️ Errore accesso Cinder API - impossibile verificare esistenza volume"
+            msg: " Errore accesso Cinder API - impossibile verificare esistenza volume"
         
         - name: Use fallback volume name
           set_fact:
