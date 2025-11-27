@@ -257,7 +257,14 @@
             wait: yes
             timeout: 800
           register: lb_created
+        - name: DEBUG - Show entire lb_created structure
+          debug:
+            var: lb_created
+            verbosity: 0
 
+        - name: DEBUG - Show lb_created keys
+          debug:
+            msg: "Keys in lb_created: {{ lb_created.keys() | list }}"
         - name: Extract Load Balancer information
           set_fact:
             lb_id: "{{ lb_created.id }}"
