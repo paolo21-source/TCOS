@@ -262,7 +262,7 @@
           set_fact:
             lb_vip_address: "{{ lb_created.loadbalancer.vip_address | default(lb_created.vip_address | default('N/A')) }}"
             lb_vip_port_id: "{{ lb_created.loadbalancer.vip_port_id | default(lb_created.vip_port_id | default('N/A')) }}"
-            lb_id: "{{ lb_created.loadbalancer.id | default(lb_created.id | default('N/A')) }}"
+            lb_id: "{{ lb_created.id | default(lb_created.loadbalancer.id | default('N/A')) }}"
 
         - name: Log Load Balancer creation
           debug:
