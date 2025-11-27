@@ -916,6 +916,22 @@
           when: 
             - listener_id is not defined or (listener_has_default_pool | default(false))
 
+        - name: Wait for LB to be ACTIVE after pool creation
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
+          retries: 30
+          delay: 5
+          when: 
+            - listener_id is not defined or (listener_has_default_pool | default(false))
+
         - name: Extract created pool ID
           set_fact:
             created_pool_id: "{{ pool_created.json.pool.id }}"
