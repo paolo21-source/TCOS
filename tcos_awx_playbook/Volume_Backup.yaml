@@ -41,7 +41,7 @@
 
     - name: Log authentication
       debug:
-        msg: "🔐 Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -166,7 +166,7 @@
                   - "=============================================="
             - name: Disable AWX schedule for deleted volume
               uri:
-                url: "{{ awx_host }}/api/v2/schedules/{{ awx_schedule_id }}/"
+                url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/{{ awx_schedule_id }}/"
                 method: PATCH
                 url_username: "{{ awx_username }}"
                 url_password: "{{ awx_password }}"
