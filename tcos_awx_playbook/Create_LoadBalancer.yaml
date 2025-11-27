@@ -348,7 +348,7 @@
           ignore_errors: yes
 
         # ========================================
-        # CREATE POOL (Always) - VIA API
+        # CREATE POOL (Always)
         # ========================================
         - name: Extract listener ID
           set_fact:
@@ -388,8 +388,8 @@
             status_code: 200
             return_content: yes
             validate_certs: no
-          register: lb_status_check
-          until: lb_status_check.json.loadbalancer.provisioning_status == 'ACTIVE'
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
           retries: 30
           delay: 5
 
@@ -479,7 +479,7 @@
             msg: "ℹ️ Pool creato senza membri. Potrai aggiungerne in seguito tramite OpenStack."
 
         # ========================================
-        # CREATE HEALTH MONITOR (Optional) - VIA API
+        # CREATE HEALTH MONITOR (Optional)
         # ========================================
         - name: Create Health Monitor block
           when: 
@@ -542,8 +542,8 @@
                 status_code: 200
                 return_content: yes
                 validate_certs: no
-              register: lb_status_check_monitor
-              until: lb_status_check_monitor.json.loadbalancer.provisioning_status == 'ACTIVE'
+              register: lb_status
+              until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
               retries: 30
               delay: 5
 
@@ -676,8 +676,8 @@
             status_code: 200
             return_content: yes
             validate_certs: no
-          register: lb_status_cleanup
-          until: lb_status_cleanup.json.loadbalancer.provisioning_status == 'ACTIVE'
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
           retries: 30
           delay: 5
           ignore_errors: yes
@@ -697,4 +697,4 @@
 
         - name: Fail the playbook
           fail:
-            msg: "❌ Creazione Load Balancer L4 fallita: {{ ansible_failed_task.name | default('operazione sconosciuta') }}"
+            msg: " Creazione Load Balancer L4 fallita: {{ ansible_failed_task.name | default('operazione sconosciuta') }}"
