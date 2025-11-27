@@ -892,17 +892,26 @@
           when: 
             - listener_id is not defined or (listener_has_default_pool | default(false))
 
-        - name: Create Pool standalone
-          openstack.cloud.lb_pool:
-            auth: "{{ openstack_auth }}"
-            name: "{{ pool_name }}"
-            loadbalancer: "{{ lb_name_for_pool }}"
-            protocol: "{{ pool_protocol | upper }}"
-            lb_algorithm: "{{ pool_lb_algorithm | upper }}"
-            description: "{{ pool_description | default(omit) }}"
-            state: present
-            wait: yes
-            timeout: 120
+        
+        - name: Create Pool standalone via API
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+              Content-Type: application/json
+            body:
+              pool:
+                name: "{{ pool_name }}"
+                loadbalancer_id: "{{ loadbalancer_id }}"
+                protocol: "{{ pool_protocol | upper }}"
+                lb_algorithm: "{{ pool_lb_algorithm | upper }}"
+                description: "{{ pool_description | default(omit) }}"
+                admin_state_up: true
+            body_format: json
+            status_code: 201
+            return_content: yes
+            validate_certs: no
           register: pool_created
           when: 
             - listener_id is not defined or (listener_has_default_pool | default(false))
