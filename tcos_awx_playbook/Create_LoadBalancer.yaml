@@ -147,26 +147,6 @@
       debug:
         msg: "🔧 Configurazione OpenStack per moduli cloud | Project: {{ openstack_project_name | default(openstack_project_id) }}"
 
-    - name: Find Octavia endpoint
-      set_fact:
-        octavia_endpoint: "{{ item.endpoints | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first | default(item.endpoints | selectattr('interface', 'equalto', 'internal') | map(attribute='url') | first) }}"
-      when: item.type == 'load-balancer' or item.name == 'octavia'
-      loop: "{{ service_catalog }}"
-      register: octavia_search
-
-    - name: Set Octavia URL
-      set_fact:
-        octavia_url: "{{ octavia_search.results | selectattr('ansible_facts', 'defined') | map(attribute='ansible_facts.octavia_endpoint') | select('defined') | first }}"
-
-    - name: Fail if Octavia not found
-      fail:
-        msg: " Servizio Octavia non trovato nel service catalog"
-      when: octavia_url is not defined or octavia_url == ""
-
-    - name: Log Octavia endpoint
-      debug:
-        msg: " Octavia endpoint: {{ octavia_url }}"
-
     # ========================================
     # MAIN BLOCK CON RESCUE
     # ========================================
@@ -350,56 +330,22 @@
         # ========================================
         # CREATE POOL (Always)
         # ========================================
-        - name: Extract listener ID
-          set_fact:
-            listener_id: "{{ listener_created.listener.id }}"
-
-        - name: Build Pool create body
-          set_fact:
-            pool_create_body:
-              pool:
-                name: "{{ pool_name }}"
-                listener_id: "{{ listener_id }}"
-                protocol: "{{ pool_protocol | upper }}"
-                lb_algorithm: "{{ pool_algorithm | upper }}"
-                description: "{{ pool_description | default(omit) }}"
-                admin_state_up: true
-
-        - name: Create Pool via API
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/pools"
-            method: POST
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-              Content-Type: application/json
-            body: "{{ pool_create_body }}"
-            body_format: json
-            status_code: 201
-            return_content: yes
-            validate_certs: no
+        - name: Create Pool
+          openstack.cloud.lb_pool:
+            auth: "{{ openstack_auth }}"
+            name: "{{ pool_name }}"
+            listener: "{{ listener_name }}"
+            protocol: "{{ pool_protocol | upper }}"
+            lb_algorithm: "{{ pool_algorithm }}"
+            description: "{{ pool_description | default(omit) }}"
+            state: present
+            wait: yes
+            timeout: 120
           register: pool_created
-
-        - name: Wait for LB to be ACTIVE after pool creation
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ lb_id }}"
-            method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-            status_code: 200
-            return_content: yes
-            validate_certs: no
-          register: lb_status
-          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
-          retries: 30
-          delay: 5
-
-        - name: Extract pool ID
-          set_fact:
-            pool_id: "{{ pool_created.json.pool.id }}"
 
         - name: Log Pool creation
           debug:
-            msg: "✓ Pool '{{ pool_name }}' creato! ID: {{ pool_id }}, Algoritmo: {{ pool_algorithm }}"
+            msg: "✓ Pool '{{ pool_name }}' creato! Algoritmo: {{ pool_algorithm }}"
 
         # ========================================
         # PARSE AND ADD POOL MEMBERS (Optional - 0 to N)
@@ -488,64 +434,23 @@
             - monitor_delay is defined
             - monitor_timeout is defined
           block:
-            - name: Build Health Monitor create body (TCP/UDP/PING)
-              set_fact:
-                monitor_create_body:
-                  healthmonitor:
-                    name: "{{ monitor_name }}"
-                    pool_id: "{{ pool_id }}"
-                    type: "{{ monitor_type | upper }}"
-                    delay: "{{ monitor_delay | int }}"
-                    timeout: "{{ monitor_timeout | int }}"
-                    max_retries: "{{ monitor_max_retries | default(3) | int }}"
-                    max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
-                    admin_state_up: true
-              when: monitor_type | upper not in ['HTTP', 'HTTPS']
-
-            - name: Build Health Monitor create body (HTTP/HTTPS)
-              set_fact:
-                monitor_create_body:
-                  healthmonitor:
-                    name: "{{ monitor_name }}"
-                    pool_id: "{{ pool_id }}"
-                    type: "{{ monitor_type | upper }}"
-                    delay: "{{ monitor_delay | int }}"
-                    timeout: "{{ monitor_timeout | int }}"
-                    max_retries: "{{ monitor_max_retries | default(3) | int }}"
-                    max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
-                    http_method: "{{ monitor_http_method | default('GET') | upper }}"
-                    url_path: "{{ monitor_url_path | default('/') }}"
-                    expected_codes: "{{ monitor_expected_codes | default('200') }}"
-                    admin_state_up: true
-              when: monitor_type | upper in ['HTTP', 'HTTPS']
-
-            - name: Create Health Monitor via API
-              uri:
-                url: "{{ octavia_url }}/v2.0/lbaas/healthmonitors"
-                method: POST
-                headers:
-                  X-Auth-Token: "{{ os_auth_token }}"
-                  Content-Type: application/json
-                body: "{{ monitor_create_body }}"
-                body_format: json
-                status_code: 201
-                return_content: yes
-                validate_certs: no
+            - name: Create Health Monitor
+              openstack.cloud.lb_health_monitor:
+                auth: "{{ openstack_auth }}"
+                name: "{{ monitor_name }}"
+                pool: "{{ pool_name }}"
+                type: "{{ monitor_type | upper }}"
+                delay: "{{ monitor_delay | int }}"
+                health_monitor_timeout: "{{ monitor_timeout | int }}"
+                max_retries: "{{ monitor_max_retries | default(3) | int }}"
+                max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
+                http_method: "{{ monitor_http_method | default(omit) }}"
+                url_path: "{{ monitor_url_path | default(omit) }}"
+                expected_codes: "{{ monitor_expected_codes | default(omit) }}"
+                state: present
+                wait: yes
+                timeout: 120
               register: monitor_created
-
-            - name: Wait for LB to be ACTIVE after monitor creation
-              uri:
-                url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ lb_id }}"
-                method: GET
-                headers:
-                  X-Auth-Token: "{{ os_auth_token }}"
-                status_code: 200
-                return_content: yes
-                validate_certs: no
-              register: lb_status
-              until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
-              retries: 30
-              delay: 5
 
             - name: Log Health Monitor creation
               debug:
@@ -667,22 +572,6 @@
               {% if pool_members_list is defined %}Membri:   {{ pool_members_list | length }}{% endif %}
 
       rescue:
-        - name: Wait for LB to be ACTIVE before cleanup
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ lb_id }}"
-            method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-            status_code: 200
-            return_content: yes
-            validate_certs: no
-          register: lb_status
-          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
-          retries: 30
-          delay: 5
-          ignore_errors: yes
-          when: lb_id is defined
-
         - name: Cleanup on failure
           openstack.cloud.loadbalancer:
             auth: "{{ openstack_auth }}"
