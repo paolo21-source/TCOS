@@ -705,81 +705,70 @@
           debug:
             msg: "🔧 Creazione Listener '{{ listener_name }}' su LB {{ loadbalancer_id }}"
 
-        - name: Get Load Balancer name from ID
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
-            method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-            status_code: 200
-            return_content: yes
-            validate_certs: no
-          register: lb_info_response
-
-        - name: Extract LB name
+        - name: Build Listener create body
           set_fact:
-            lb_name_for_listener: "{{ lb_info_response.json.loadbalancer.name }}"
+            listener_create_body:
+              listener:
+                name: "{{ listener_name }}"
+                loadbalancer_id: "{{ loadbalancer_id }}"
+                protocol: "{{ listener_protocol | upper }}"
+                protocol_port: "{{ listener_port | int }}"
+                admin_state_up: "{{ listener_admin_state | default(true) | bool }}"
 
-        - name: Create Listener using OpenStack module
-          openstack.cloud.lb_listener:
-            auth: "{{ openstack_auth }}"
-            name: "{{ listener_name }}"
-            load_balancer: "{{ lb_name_for_listener }}"
-            protocol: "{{ listener_protocol | upper }}"
-            protocol_port: "{{ listener_port | int }}"
-            description: "{{ listener_description | default(omit) }}"
-            timeout_client_data: "{{ listener_timeout_client_data | default(omit) }}"
-            timeout_member_data: "{{ listener_timeout_member_data | default(omit) }}"
-            is_admin_state_up: "{{ listener_admin_state | default(true) }}"
-            state: present
-            wait: yes
-            timeout: 120
-          register: listener_created
-
-        - name: Extract created listener ID
+        - name: Add description to listener
           set_fact:
-            created_listener_id: "{{ listener_created.listener.id }}"
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'description': listener_description})}) }}"
+          when: listener_description is defined
 
-        - name: Build update body for advanced parameters
+        - name: Add timeout_client_data to listener
           set_fact:
-            listener_update_body:
-              listener: {}
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'timeout_client_data': listener_timeout_client_data | int})}) }}"
+          when: listener_timeout_client_data is defined
 
-        - name: Add connection_limit to update
+        - name: Add timeout_member_data to listener
           set_fact:
-            listener_update_body: "{{ listener_update_body | combine({'listener': listener_update_body.listener | combine({'connection_limit': listener_connection_limit | int})}) }}"
-          when: listener_connection_limit is defined
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'timeout_member_data': listener_timeout_member_data | int})}) }}"
+          when: listener_timeout_member_data is defined
 
-        - name: Add timeout_member_connect to update
+        - name: Add timeout_member_connect to listener
           set_fact:
-            listener_update_body: "{{ listener_update_body | combine({'listener': listener_update_body.listener | combine({'timeout_member_connect': listener_timeout_member_connect | int})}) }}"
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'timeout_member_connect': listener_timeout_member_connect | int})}) }}"
           when: listener_timeout_member_connect is defined
 
-        - name: Add timeout_tcp_inspect to update
+        - name: Add timeout_tcp_inspect to listener
           set_fact:
-            listener_update_body: "{{ listener_update_body | combine({'listener': listener_update_body.listener | combine({'timeout_tcp_inspect': listener_timeout_tcp_inspect | int})}) }}"
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'timeout_tcp_inspect': listener_timeout_tcp_inspect | int})}) }}"
           when: listener_timeout_tcp_inspect is defined
 
-        - name: Add allowed_cidrs to update
+        - name: Add connection_limit to listener
           set_fact:
-            listener_update_body: "{{ listener_update_body | combine({'listener': listener_update_body.listener | combine({'allowed_cidrs': listener_allowed_cidrs.split(',') | map('trim') | list})}) }}"
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'connection_limit': listener_connection_limit | int})}) }}"
+          when: listener_connection_limit is defined
+
+        - name: Add allowed_cidrs to listener
+          set_fact:
+            listener_create_body: "{{ listener_create_body | combine({'listener': listener_create_body.listener | combine({'allowed_cidrs': listener_allowed_cidrs.split(',') | map('trim') | list})}) }}"
           when:
             - listener_allowed_cidrs is defined
             - listener_allowed_cidrs | length > 0
 
-        - name: Update Listener with advanced parameters via API
+        - name: Create Listener via API
           uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/listeners/{{ created_listener_id }}"
-            method: PUT
+            url: "{{ octavia_url }}/v2.0/lbaas/listeners"
+            method: POST
             headers:
               X-Auth-Token: "{{ os_auth_token }}"
               Content-Type: application/json
-            body: "{{ listener_update_body }}"
+            body: "{{ listener_create_body }}"
             body_format: json
-            status_code: 200
+            status_code: 201
             return_content: yes
             validate_certs: no
-          when: listener_update_body.listener | length > 0
+          register: listener_created
+
+        - name: Extract created listener ID
+          set_fact:
+            created_listener_id: "{{ listener_created.json.listener.id }}"
 
         - name: Wait for LB to be ACTIVE
           uri:
@@ -849,58 +838,31 @@
             return_content: yes
             validate_certs: no
           register: listener_info_response
-          when: listener_id is defined
+          when: listener_id is defined and listener_id | length > 0
 
         - name: Extract listener info
           set_fact:
             listener_has_default_pool: "{{ listener_info_response.json.listener.default_pool_id is defined and listener_info_response.json.listener.default_pool_id != none }}"
-            listener_name_for_pool: "{{ listener_info_response.json.listener.name }}"
-          when: listener_id is defined
+          when: listener_id is defined and listener_id | length > 0
 
-        - name: Create Pool with listener
-          openstack.cloud.lb_pool:
-            auth: "{{ openstack_auth }}"
-            name: "{{ pool_name }}"
-            listener: "{{ listener_name_for_pool }}"
-            protocol: "{{ pool_protocol | upper }}"
-            lb_algorithm: "{{ pool_lb_algorithm | upper }}"
-            description: "{{ pool_description | default(omit) }}"
-            state: present
-            wait: yes
-            timeout: 120
-          register: pool_created
+        - name: Build Pool create body (with listener)
+          set_fact:
+            pool_create_body:
+              pool:
+                name: "{{ pool_name }}"
+                listener_id: "{{ listener_id }}"
+                protocol: "{{ pool_protocol | upper }}"
+                lb_algorithm: "{{ pool_lb_algorithm | upper }}"
+                description: "{{ pool_description | default(omit) }}"
+                admin_state_up: true
           when: 
             - listener_id is defined
+            - listener_id | length > 0
             - not (listener_has_default_pool | default(false))
 
-        - name: Get Load Balancer name
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
-            method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-            status_code: 200
-            return_content: yes
-            validate_certs: no
-          register: lb_info_response
-          when: 
-            - listener_id is not defined or (listener_has_default_pool | default(false))
-
-        - name: Extract LB name
+        - name: Build Pool create body (standalone)
           set_fact:
-            lb_name_for_pool: "{{ lb_info_response.json.loadbalancer.name }}"
-          when: 
-            - listener_id is not defined or (listener_has_default_pool | default(false))
-
-        
-        - name: Create Pool standalone via API
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/pools"
-            method: POST
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-              Content-Type: application/json
-            body:
+            pool_create_body:
               pool:
                 name: "{{ pool_name }}"
                 loadbalancer_id: "{{ loadbalancer_id }}"
@@ -908,13 +870,22 @@
                 lb_algorithm: "{{ pool_lb_algorithm | upper }}"
                 description: "{{ pool_description | default(omit) }}"
                 admin_state_up: true
+          when: 
+            - listener_id is not defined or listener_id | length == 0 or (listener_has_default_pool | default(false))
+
+        - name: Create Pool via API
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+              Content-Type: application/json
+            body: "{{ pool_create_body }}"
             body_format: json
             status_code: 201
             return_content: yes
             validate_certs: no
           register: pool_created
-          when: 
-            - listener_id is not defined or (listener_has_default_pool | default(false))
 
         - name: Wait for LB to be ACTIVE after pool creation
           uri:
@@ -929,8 +900,6 @@
           until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
           retries: 30
           delay: 5
-          when: 
-            - listener_id is not defined or (listener_has_default_pool | default(false))
 
         - name: Extract created pool ID
           set_fact:
@@ -972,7 +941,7 @@
             validate_certs: no
           when: pool_update_body.pool | length > 0
 
-        - name: Wait for LB to be ACTIVE
+        - name: Wait for LB to be ACTIVE after pool update
           uri:
             url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
             method: GET
@@ -985,6 +954,7 @@
           until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
           retries: 30
           delay: 5
+          when: pool_update_body.pool | length > 0
 
         - name: Log Pool created
           debug:
@@ -1032,82 +1002,54 @@
           debug:
             msg: "🔧 Creazione Health Monitor '{{ monitor_name }}' su Pool {{ pool_id }}"
 
-        - name: Get Pool name from ID
-          uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/pools/{{ pool_id }}"
-            method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-            status_code: 200
-            return_content: yes
-            validate_certs: no
-          register: pool_info_response
-
-        - name: Extract Pool name
+        - name: Build Health Monitor create body (TCP/UDP/PING)
           set_fact:
-            pool_name_for_monitor: "{{ pool_info_response.json.pool.name }}"
-
-        - name: Create Health Monitor (TCP/UDP/PING)
-          openstack.cloud.lb_health_monitor:
-            auth: "{{ openstack_auth }}"
-            name: "{{ monitor_name }}"
-            pool: "{{ pool_name_for_monitor }}"
-            type: "{{ monitor_type | upper }}"
-            delay: "{{ monitor_delay | int }}"
-            health_monitor_timeout: "{{ monitor_timeout | int }}"
-            max_retries: "{{ monitor_max_retries | default(3) | int }}"
-            max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
-            state: present
-            wait: yes
-            timeout: 120
-          register: monitor_created_basic
+            monitor_create_body:
+              healthmonitor:
+                name: "{{ monitor_name }}"
+                pool_id: "{{ pool_id }}"
+                type: "{{ monitor_type | upper }}"
+                delay: "{{ monitor_delay | int }}"
+                timeout: "{{ monitor_timeout | int }}"
+                max_retries: "{{ monitor_max_retries | default(3) | int }}"
+                max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
+                admin_state_up: "{{ monitor_admin_state | default(true) | bool }}"
           when: monitor_type | upper not in ['HTTP', 'HTTPS']
 
-        - name: Create Health Monitor (HTTP/HTTPS)
-          openstack.cloud.lb_health_monitor:
-            auth: "{{ openstack_auth }}"
-            name: "{{ monitor_name }}"
-            pool: "{{ pool_name_for_monitor }}"
-            type: "{{ monitor_type | upper }}"
-            delay: "{{ monitor_delay | int }}"
-            health_monitor_timeout: "{{ monitor_timeout | int }}"
-            max_retries: "{{ monitor_max_retries | default(3) | int }}"
-            max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
-            http_method: "{{ monitor_http_method | default('GET') | upper }}"
-            url_path: "{{ monitor_url_path | default('/') }}"
-            expected_codes: "{{ monitor_expected_codes | default('200') }}"
-            state: present
-            wait: yes
-            timeout: 120
-          register: monitor_created_http
+        - name: Build Health Monitor create body (HTTP/HTTPS)
+          set_fact:
+            monitor_create_body:
+              healthmonitor:
+                name: "{{ monitor_name }}"
+                pool_id: "{{ pool_id }}"
+                type: "{{ monitor_type | upper }}"
+                delay: "{{ monitor_delay | int }}"
+                timeout: "{{ monitor_timeout | int }}"
+                max_retries: "{{ monitor_max_retries | default(3) | int }}"
+                max_retries_down: "{{ monitor_max_retries_down | default(3) | int }}"
+                http_method: "{{ monitor_http_method | default('GET') | upper }}"
+                url_path: "{{ monitor_url_path | default('/') }}"
+                expected_codes: "{{ monitor_expected_codes | default('200') }}"
+                admin_state_up: "{{ monitor_admin_state | default(true) | bool }}"
           when: monitor_type | upper in ['HTTP', 'HTTPS']
 
-        - name: Extract created monitor ID
-          set_fact:
-            created_monitor_id: "{{ monitor_created_basic.health_monitor.id if monitor_created_basic is defined and monitor_created_basic is not skipped else monitor_created_http.health_monitor.id }}"
-
-        - name: Build update body for admin state
-          set_fact:
-            monitor_update_body:
-              healthmonitor:
-                admin_state_up: "{{ monitor_admin_state | bool }}"
-          when: monitor_admin_state is defined
-
-        - name: Update Health Monitor admin state
+        - name: Create Health Monitor via API
           uri:
-            url: "{{ octavia_url }}/v2.0/lbaas/healthmonitors/{{ created_monitor_id }}"
-            method: PUT
+            url: "{{ octavia_url }}/v2.0/lbaas/healthmonitors"
+            method: POST
             headers:
               X-Auth-Token: "{{ os_auth_token }}"
               Content-Type: application/json
-            body: "{{ monitor_update_body }}"
+            body: "{{ monitor_create_body }}"
             body_format: json
-            status_code: 200
+            status_code: 201
             return_content: yes
             validate_certs: no
-          when: 
-            - monitor_admin_state is defined
-            - monitor_update_body is defined
+          register: monitor_created
+
+        - name: Extract created monitor ID
+          set_fact:
+            created_monitor_id: "{{ monitor_created.json.healthmonitor.id }}"
 
         - name: Wait for LB to be ACTIVE
           uri:
@@ -1283,6 +1225,7 @@
             validate_certs: no
           when: manageiq_notification_url is defined
           ignore_errors: yes
+
     # ========================================
     # AZIONE: REMOVE MEMBER
     # ========================================
