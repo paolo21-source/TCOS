@@ -251,7 +251,7 @@
     
             - name: Log schedule disable success
               debug:
-                msg: "✓ Schedule AWX {{ awx_schedule_id }} disabilitato automaticamente"
+                msg: "✓ Schedule AWX disabilitato automaticamente (ID: {{ awx_schedule_id | default('N/A') }})"
               when: 
                 - schedule_disable_result is defined
                 - schedule_disable_result is succeeded
