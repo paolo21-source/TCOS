@@ -260,9 +260,10 @@
 
         - name: Extract Load Balancer information
           set_fact:
+            lb_id: "{{ lb_created.id }}"
             lb_vip_address: "{{ lb_created.vip_address }}"
             lb_vip_port_id: "{{ lb_created.vip_port_id }}"
-            lb_id: "{{ lb_created.id }}"
+
 
         - name: Log Load Balancer creation
           debug:
