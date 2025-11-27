@@ -164,6 +164,72 @@
                   - "Il backup schedule dovrebbe essere disabilitato."
                   - "Uscita senza errori per non bloccare lo schedule."
                   - "=============================================="
+            
+            # =============================================
+            # RECUPERA SCHEDULE ID DA AWX (se volume eliminato)
+            # =============================================
+            
+            - name: Retrieve AWX schedule for this volume (if needed for disable)
+              when: 
+                - awx_username is defined
+                - awx_password is defined
+              block:
+                - name: Get all schedules from AWX
+                  uri:
+                    url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/"
+                    method: GET
+                    url_username: "{{ awx_username }}"
+                    url_password: "{{ awx_password }}"
+                    force_basic_auth: yes
+                    validate_certs: "{{ awx_validate_certs | default('no') }}"
+                    return_content: yes
+                    timeout: 30
+                  register: awx_schedules
+                  ignore_errors: yes
+
+                - name: Filter schedules for this volume
+                  set_fact:
+                    volume_schedules: "{{ awx_schedules.json.results | selectattr('name', 'search', volume_id) | list }}"
+                  when: 
+                    - awx_schedules is succeeded
+                    - awx_schedules.json.results is defined
+
+                - name: Filter active schedules for this volume
+                  set_fact:
+                    active_schedules: "{{ volume_schedules | selectattr('enabled', 'equalto', true) | list }}"
+                  when: volume_schedules is defined
+
+                - name: Set schedule ID from first active schedule
+                  set_fact:
+                    awx_schedule_id: "{{ active_schedules[0].id }}"
+                  when: 
+                    - active_schedules is defined
+                    - active_schedules | length > 0
+
+                - name: Set schedule ID from first schedule (even if disabled)
+                  set_fact:
+                    awx_schedule_id: "{{ volume_schedules[0].id }}"
+                  when: 
+                    - awx_schedule_id is not defined
+                    - volume_schedules is defined
+                    - volume_schedules | length > 0
+
+                - name: Log schedule found
+                  debug:
+                    msg: 
+                      - "✓ Schedule AWX trovato per volume {{ volume_id }}"
+                      - "  Schedule ID: {{ awx_schedule_id }}"
+                      - "  Schedules totali: {{ volume_schedules | length }}"
+                      - "  Schedules attivi: {{ active_schedules | length }}"
+                  when: 
+                    - awx_schedule_id is defined
+                    - awx_schedule_id != ''
+
+                - name: Log no schedule found
+                  debug:
+                    msg: "⚠ Nessuno schedule AWX trovato per volume {{ volume_id }} - skip disable"
+                  when: awx_schedule_id is not defined or awx_schedule_id == ''
+            
             - name: Disable AWX schedule for deleted volume
               uri:
                 url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/{{ awx_schedule_id }}/"
@@ -176,7 +242,7 @@
                 body:
                   enabled: false
                 body_format: json
-                validate_certs: "{{ awx_validate_certs }}"
+                validate_certs: "{{ awx_validate_certs | default('no') }}"
                 status_code: [200]
                 timeout: 10
               when: awx_schedule_id is defined and awx_schedule_id != ''
