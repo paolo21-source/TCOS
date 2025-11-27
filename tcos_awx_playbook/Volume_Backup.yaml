@@ -12,7 +12,13 @@
   environment:
     no_proxy: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it"
     NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local,.svc,.svc.cluster.local,milano.cloudopen.tim.it"
-  
+  vars:
+    awx_host: "http://awx-prod-service.awx.svc:80"
+    awx_validate_certs: false
+    retention_days: 15
+  vars_files:
+    - vars/awx_credentials.yaml
+    
   tasks:
     # =============================================
     # 1. VALIDAZIONE INPUT
