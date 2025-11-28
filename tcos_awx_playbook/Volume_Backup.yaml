@@ -180,7 +180,7 @@
               block:
                 - name: Get all schedules from AWX
                   uri:
-                    url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/"
+                    url: "{{ awx_host }}/api/v2/schedules/"
                     method: GET
                     url_username: "{{ awx_user }}"
                     url_password: "{{ awx_password }}"
@@ -236,7 +236,7 @@
             
             - name: Disable AWX schedule for deleted volume
               uri:
-                url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/{{ awx_schedule_id }}/"
+                url: "{{ awx_host }}/api/v2/schedules/{{ awx_schedule_id }}/"
                 method: PATCH
                 url_username: "{{ awx_user }}"
                 url_password: "{{ awx_password }}"
