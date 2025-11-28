@@ -176,9 +176,7 @@
             # =============================================
             
             - name: Retrieve AWX schedule for this volume (if needed for disable)
-              when: 
-                - awx_username is defined
-                - awx_password is defined
+
               block:
                 - name: Get all schedules from AWX
                   uri:
@@ -248,7 +246,7 @@
                 body:
                   enabled: false
                 body_format: json
-                validate_certs: "{{ awx_validate_certs | default('no') }}"
+                validate_certs: "{{ awx_validate_certs }}"
                 status_code: [200]
                 timeout: 10
               when: awx_schedule_id is defined and awx_schedule_id != ''
