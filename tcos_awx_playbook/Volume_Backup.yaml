@@ -237,7 +237,7 @@
             - name: Disable AWX schedule for deleted volume
               uri:
                 url: "{{ awx_host }}/api/v2/schedules/{{ awx_schedule_id }}/"
-                method: PATCH
+                method: DELETE
                 url_username: "{{ awx_user }}"
                 url_password: "{{ awx_password }}"
                 force_basic_auth: yes
