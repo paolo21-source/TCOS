@@ -182,7 +182,7 @@
                   uri:
                     url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/"
                     method: GET
-                    url_username: "{{ awx_username }}"
+                    url_username: "{{ awx_user }}"
                     url_password: "{{ awx_password }}"
                     force_basic_auth: yes
                     validate_certs: "{{ awx_validate_certs | default('no') }}"
@@ -238,7 +238,7 @@
               uri:
                 url: "https://awx.k8s-prod.tcosmilano.local/api/v2/schedules/{{ awx_schedule_id }}/"
                 method: PATCH
-                url_username: "{{ awx_username }}"
+                url_username: "{{ awx_user }}"
                 url_password: "{{ awx_password }}"
                 force_basic_auth: yes
                 headers:
